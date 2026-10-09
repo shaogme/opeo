@@ -98,9 +98,8 @@ fn dropping_caught_drops_error_and_releases_the_slot() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
     {
-        let result = slot.try_call(|out| {
-            OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops))))
-        });
+        let result =
+            slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
         assert!(result.is_err());
         let Some(caught) = result.err() else {
             return;
@@ -117,8 +116,8 @@ fn dropping_caught_drops_error_and_releases_the_slot() {
 fn taking_caught_transfers_error_ownership() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
-    let result = slot
-        .try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
+    let result =
+        slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
     assert!(result.is_err());
     let Some(caught) = result.err() else {
         return;
@@ -134,8 +133,8 @@ fn taking_caught_transfers_error_ownership() {
 fn dropping_slot_cleans_error_when_caught_was_forgotten() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
-    let result = slot
-        .try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
+    let result =
+        slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
     assert!(result.is_err());
     let Some(caught) = result.err() else {
         return;
@@ -151,8 +150,8 @@ fn dropping_slot_cleans_error_when_caught_was_forgotten() {
 fn a_new_call_clears_an_error_from_a_forgotten_caught_value() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
-    let result = slot
-        .try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
+    let result =
+        slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
     assert!(result.is_err());
     let Some(caught) = result.err() else {
         return;

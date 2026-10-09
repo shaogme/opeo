@@ -36,6 +36,11 @@ impl Counter {
         Ok(self.value + amount)
     }
 
+    #[opeo(wrapper = false)]
+    fn add_without_wrapper(&self, amount: u32) -> Result<u32, ParseError> {
+        Ok(self.value + amount)
+    }
+
     #[opeo(wrapper = increment_std)]
     fn increment(&mut self, amount: u32) -> Result<u32, ParseError> {
         if amount == 0 {
@@ -247,6 +252,11 @@ fn parse_with_default_wrapper(input: &str) -> Result<u32, ParseError> {
     Ok(input.len() as u32)
 }
 
+#[opeo(wrapper = false)]
+fn parse_without_wrapper(input: &str) -> Result<u32, ParseError> {
+    input.parse::<u32>().map_err(ParseError::from)
+}
+
 #[opeo(wrapper = sum_pair_std)]
 fn sum_pair((left, right): (u8, u8)) -> Result<u16, ParseError> {
     Ok(u16::from(left) + u16::from(right))
@@ -327,6 +337,19 @@ fn attribute_macro_builds_opeo_and_standard_functions() {
     assert_eq!(parse_number_std("0"), Err(ParseError::Zero));
     assert_eq!(parse_number_std(""), Err(ParseError::Empty));
     assert_eq!(parse_text_std(""), Err(ParseError::Empty));
+}
+
+#[test]
+fn attribute_macro_can_omit_standard_wrappers() {
+    let mut slot = ErrSlot::<ParseError>::new();
+    assert_eq!(slot.call(|out| parse_without_wrapper("42", out)), Ok(42));
+    assert!(matches!(
+        slot.call(|out| parse_without_wrapper("invalid", out)),
+        Err(ParseError::Number(_))
+    ));
+
+    let counter = Counter { value: 5 };
+    assert_eq!(slot.call(|out| counter.add_without_wrapper(7, out)), Ok(12));
 }
 
 #[test]
@@ -521,10 +544,7 @@ fn attribute_macro_accepts_six_input_parameters() {
     assert_eq!(sum_six_std(1, 2, 3, 4, 5, 6), Ok(21));
 
     let mut slot = ErrSlot::<ParseError>::new();
-    assert_eq!(
-        slot.call(|out| sum_six(1, 2, 3, 4, 5, 6, out)),
-        Ok(21)
-    );
+    assert_eq!(slot.call(|out| sum_six(1, 2, 3, 4, 5, 6, out)), Ok(21));
 }
 
 #[test]

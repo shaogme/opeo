@@ -2,7 +2,7 @@
 
 `opeo` 是一个 Rust 错误处理库：函数把错误值写入由调用方持有的存储，同时单独返回成功值。失败凭证带有类型化的槽位品牌，因此不能把一个槽位上的失败传播到另一个调用的槽位。
 
-运行时 crate 使用 `no_std`。配套的 `opeo-macros` crate 提供 `#[opeo]` 属性宏，可将常规 `Result` 函数转换为 OPEO 函数，并生成供常规调用方使用的 `Result` 包装函数。
+运行时 crate 使用 `no_std`。配套的 `opeo-macros` crate 提供 `#[opeo]` 属性宏，可将常规 `Result` 函数转换为 OPEO 函数，并默认生成供常规调用方使用的 `Result` 包装函数。
 
 [English README](README.md)
 
@@ -41,7 +41,7 @@ opeo = "0.1"
 
 ## 使用 `#[opeo]` 快速开始
 
-像往常一样编写返回 `Result<T, E>` 的函数，并添加 `#[opeo]`。宏会保留该函数作为 OPEO 入口，改写可失败的操作，并默认生成名为 `<函数名>_std` 的标准包装函数。
+像往常一样编写返回 `Result<T, E>` 的函数，并添加 `#[opeo]`。宏会保留该函数作为 OPEO 入口，改写可失败的操作，并默认生成名为 `<函数名>_std` 的标准包装函数。只需要 OPEO 入口时，可设置 `wrapper = false` 关闭包装函数生成。
 
 ```rust
 use opeo::{opeo, ErrSlot};
@@ -205,6 +205,29 @@ assert_eq!(errors.call(|out| parse("8", out)), Ok(8));
 assert_eq!(parse_standard("9"), Ok(9));
 ```
 
+如果只需要 OPEO 入口，可以显式关闭包装函数生成：
+
+```rust
+use opeo::{opeo, ErrSlot};
+
+#[derive(Debug, PartialEq, Eq)]
+enum ParseError {
+    InvalidNumber,
+}
+
+#[opeo(wrapper = false)]
+fn parse(input: &str) -> Result<u32, ParseError> {
+    input
+        .parse::<u32>()
+        .map_err(|_| ParseError::InvalidNumber)
+}
+
+let mut errors = ErrSlot::<ParseError>::new();
+assert_eq!(errors.call(|out| parse("12", out)), Ok(12));
+```
+
+此时宏保留 `parse` 作为 OPEO 入口，不会生成默认的 `parse_std`。调用方可通过 `ErrSlot::call` 调用它并取得标准 `Result`。
+
 如果返回类型是一个类型别名，且其路径最后一段不叫 `Result`，请同时提供成功类型和错误类型，以便宏确定 OPEO 函数签名：
 
 ```rust
@@ -232,7 +255,7 @@ assert_eq!(errors.call(|out| parse("8", out)), Ok(8));
 
 ## 结构体方法
 
-可以在固有 `impl` 块的实例方法上使用 `#[opeo]`。宏会保留该方法作为 OPEO 入口，并生成一个使用相同接收者的标准包装方法。包装方法默认命名为 `<方法名>_std`，也可以通过 `wrapper = ...` 指定名称。异步方法会生成异步 OPEO 方法和异步标准包装方法。`const` 方法会保留 `const` 标准包装方法；由于 OPEO 入口需要写入错误槽，因此它只能在运行时调用。
+可以在固有 `impl` 块的实例方法上使用 `#[opeo]`。宏会保留该方法作为 OPEO 入口，并默认生成一个使用相同接收者的标准包装方法。包装方法默认命名为 `<方法名>_std`，也可以通过 `wrapper = ...` 指定名称，或通过 `wrapper = false` 关闭生成。异步方法会生成异步 OPEO 方法；启用包装函数时还会生成异步标准包装方法。生成 `const` 方法的包装函数时会保留 `const`；由于 OPEO 入口需要写入错误槽，因此它只能在运行时调用。
 
 ```rust
 use core::convert::Infallible;
@@ -258,7 +281,7 @@ assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 
 ## 支持范围与错误转换
 
-`#[opeo]` 支持自由函数和固有 `impl` 块中的实例方法，包括异步和 `const` 函数及方法。返回类型必须是可解析为 `Result<T, E>` 的路径，或通过 `ok` 和 `error` 显式指定类型。异步包装器返回一个 Future；`ErrSlot::call_async` 可将异步 OPEO 调用桥接回 `Result<T, E>`。`const` 函数和方法会保留 `const` 标准包装函数；OPEO 入口会失去 `const`，因为它需要写入运行时错误槽。函数或方法最多有六个显式输入参数；宏会为 OPEO 形式添加 `Out` 参数。`extern` 和可变参数函数不受支持。
+`#[opeo]` 支持自由函数和固有 `impl` 块中的实例方法，包括异步和 `const` 函数及方法。返回类型必须是可解析为 `Result<T, E>` 的路径，或通过 `ok` 和 `error` 显式指定类型。生成异步包装器时，它会返回一个 Future；`ErrSlot::call_async` 可将异步 OPEO 调用桥接回 `Result<T, E>`。生成 `const` 函数或方法的包装器时，会保留其 `const`；OPEO 入口会失去 `const`，因为它需要写入运行时错误槽。函数或方法最多有六个显式输入参数；宏会为 OPEO 形式添加 `Out` 参数。`extern` 和可变参数函数不受支持。
 
 函数体中的问号传播会将源错误写入槽位。对于 `Result<T, SourceError>`，槽位错误类型必须实现 `From<SourceError>`；需要自定义转换时使用 `map_err`。嵌套闭包会保留原本的 `?` 行为。对于 `Option<T>`，使用 `opeo_try!(out, option, error_value)` 显式提供错误值。
 

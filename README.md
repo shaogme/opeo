@@ -2,7 +2,7 @@
 
 `opeo` is a Rust error-handling library that keeps an error value in caller-owned storage while a function returns its success value separately. A typed failure proof connects the returned state to the error slot, so a failure cannot be propagated from a different call's slot.
 
-The runtime crate is `no_std`. The companion `opeo-macros` crate provides `#[opeo]`, which turns a conventional `Result` function into an OPEO function and generates a standard `Result` wrapper for callers that prefer the usual interface.
+The runtime crate is `no_std`. The companion `opeo-macros` crate provides `#[opeo]`, which turns a conventional `Result` function into an OPEO function and generates a standard `Result` wrapper by default for callers that prefer the usual interface.
 
 [简体中文 README](README_CN.md)
 
@@ -41,7 +41,7 @@ The workspace uses Rust 2024 and declares Rust 1.85 as its minimum version.
 
 ## Quick start with `#[opeo]`
 
-Write a normal function returning `Result<T, E>` and mark it with `#[opeo]`. The macro keeps the function as the OPEO entry point, rewrites fallible operations, and adds a standard wrapper named `<function>_std` by default.
+Write a normal function returning `Result<T, E>` and mark it with `#[opeo]`. The macro keeps the function as the OPEO entry point, rewrites fallible operations, and adds a standard wrapper named `<function>_std` by default. Set `wrapper = false` to omit the wrapper when you only need the OPEO entry point.
 
 ```rust
 use opeo::{opeo, ErrSlot};
@@ -205,6 +205,29 @@ assert_eq!(errors.call(|out| parse("8", out)), Ok(8));
 assert_eq!(parse_standard("9"), Ok(9));
 ```
 
+To generate only the OPEO entry point, disable the wrapper explicitly:
+
+```rust
+use opeo::{opeo, ErrSlot};
+
+#[derive(Debug, PartialEq, Eq)]
+enum ParseError {
+    InvalidNumber,
+}
+
+#[opeo(wrapper = false)]
+fn parse(input: &str) -> Result<u32, ParseError> {
+    input
+        .parse::<u32>()
+        .map_err(|_| ParseError::InvalidNumber)
+}
+
+let mut errors = ErrSlot::<ParseError>::new();
+assert_eq!(errors.call(|out| parse("12", out)), Ok(12));
+```
+
+The macro keeps `parse` as the OPEO entry point and does not generate `parse_std`. Call it through `ErrSlot::call` when you need a standard `Result` at the call site.
+
 If the return type is a type alias whose final path segment is not named `Result`, provide both success and error types so the macro can determine the OPEO signature:
 
 ```rust
@@ -232,7 +255,7 @@ assert_eq!(errors.call(|out| parse("8", out)), Ok(8));
 
 ## Struct methods
 
-Apply `#[opeo]` to an instance method in an inherent `impl` block. The macro keeps the method as the OPEO entry point and generates a standard wrapper method with the same receiver. The wrapper name defaults to `<method>_std` and can be set with `wrapper = ...`. Async methods produce an async OPEO method and an async standard wrapper. Const methods keep a const standard wrapper; their OPEO entry is runtime-only because it writes to an error slot.
+Apply `#[opeo]` to an instance method in an inherent `impl` block. The macro keeps the method as the OPEO entry point and generates a standard wrapper method with the same receiver by default. The wrapper name defaults to `<method>_std`, can be set with `wrapper = ...`, or can be disabled with `wrapper = false`. Async methods produce an async OPEO method and, when enabled, an async standard wrapper. Generated wrappers for const methods keep `const`; the OPEO entry is runtime-only because it writes to an error slot.
 
 ```rust
 use core::convert::Infallible;
@@ -258,7 +281,7 @@ assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 
 ## Supported functions and error conversion
 
-`#[opeo]` supports free functions and instance methods in inherent `impl` blocks, including async and const functions and methods. The return type must be a path that resolves to `Result<T, E>` or use explicit `ok` and `error` types. Async wrappers return a future, and `ErrSlot::call_async` bridges async OPEO calls back to `Result<T, E>`. Const functions and methods keep their generated standard wrapper const; the OPEO entry is not const because it writes to runtime error storage. A function or method may have up to six explicit input parameters; the macro adds the `Out` parameter to the OPEO form. `extern` and variadic functions are rejected.
+`#[opeo]` supports free functions and instance methods in inherent `impl` blocks, including async and const functions and methods. The return type must be a path that resolves to `Result<T, E>` or use explicit `ok` and `error` types. Generated async wrappers return a future, and `ErrSlot::call_async` bridges async OPEO calls back to `Result<T, E>`. Generated wrappers for const functions and methods remain const; the OPEO entry is not const because it writes to runtime error storage. A function or method may have up to six explicit input parameters; the macro adds the `Out` parameter to the OPEO form. `extern` and variadic functions are rejected.
 
 Question-mark propagation in the function body stores the source error in the slot. For a `Result<T, SourceError>`, the slot error type must implement `From<SourceError>`; use `map_err` when a custom conversion is needed. Nested closures keep their own normal `?` behavior. For `Option<T>`, use `opeo_try!(out, option, error_value)` to provide the error explicitly.
 

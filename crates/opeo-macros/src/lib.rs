@@ -3,7 +3,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Block, Error, Expr, ExprCall, ExprPath, FnArg, GenericParam, Ident, ItemFn,
-    Lifetime, Meta, Pat, PatIdent, Path, ReturnType, Stmt, Token, Type,
+    Lifetime, LitBool, Meta, Pat, PatIdent, Path, ReturnType, Stmt, Token, Type,
     parse::{Parse, ParseStream, Parser},
     parse_macro_input, parse_quote,
     punctuated::Punctuated,
@@ -13,9 +13,9 @@ use syn::{
 /// Generates an OPEO function or method and a standard wrapper from a `Result` function.
 /// 从标准 `Result` 函数或方法生成 OPEO 入口和标准包装入口。
 ///
-/// `wrapper` is optional and defaults to `<function>_std`. Use `wrapper_attrs(...)` to copy
-/// selected non-symbol attributes to the generated wrapper.
-/// `wrapper` 可省略，默认生成为 `<函数名>_std`。可用 `wrapper_attrs(...)` 选择复制到包装函数的非符号属性。
+/// `wrapper` defaults to `<function>_std`; set it to `false` to omit the wrapper. Use
+/// `wrapper_attrs(...)` to copy selected non-symbol attributes to the generated wrapper.
+/// `wrapper` 默认生成为 `<函数名>_std`；设为 `false` 可关闭包装函数。可用 `wrapper_attrs(...)` 选择复制到包装函数的非符号属性。
 #[proc_macro_attribute]
 pub fn opeo(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let attribute = parse_macro_input!(attribute as OpeoArgs);
@@ -28,21 +28,27 @@ pub fn opeo(attribute: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 struct OpeoArgs {
-    wrapper_name: Option<syn::Ident>,
+    wrapper: WrapperConfig,
     ok_type: Option<Type>,
     error_type: Option<Type>,
     wrapper_attributes: Vec<Path>,
 }
 
+enum WrapperConfig {
+    Default,
+    Named(Ident),
+    Disabled,
+}
+
 impl Parse for OpeoArgs {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let mut wrapper_name = None;
+        let mut wrapper = None;
         let mut ok_type = None;
         let mut error_type = None;
         let mut wrapper_attributes = None;
 
         while !input.is_empty() {
-            let key: syn::Ident = input.parse()?;
+            let key: Ident = input.parse()?;
             if key == "wrapper_attrs" {
                 if wrapper_attributes.is_some() {
                     return Err(Error::new_spanned(
@@ -69,13 +75,22 @@ impl Parse for OpeoArgs {
                 input.parse::<Token![=]>()?;
                 match key.to_string().as_str() {
                     "wrapper" => {
-                        if wrapper_name.is_some() {
+                        if wrapper.is_some() {
                             return Err(Error::new_spanned(
                                 key,
                                 "`wrapper` may only be specified once",
                             ));
                         }
-                        wrapper_name = Some(input.parse()?);
+                        wrapper = Some(if input.peek(LitBool) {
+                            let enabled: LitBool = input.parse()?;
+                            if enabled.value {
+                                WrapperConfig::Default
+                            } else {
+                                WrapperConfig::Disabled
+                            }
+                        } else {
+                            WrapperConfig::Named(input.parse()?)
+                        });
                     }
                     "ok" => {
                         if ok_type.is_some() {
@@ -114,7 +129,7 @@ impl Parse for OpeoArgs {
         }
 
         Ok(Self {
-            wrapper_name,
+            wrapper: wrapper.unwrap_or(WrapperConfig::Default),
             ok_type,
             error_type,
             wrapper_attributes: wrapper_attributes.unwrap_or_default(),
@@ -133,9 +148,11 @@ fn expand_opeo_with_path(
     runtime_path: Path,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let original_function = function.clone();
-    let wrapper_name = attribute
-        .wrapper_name
-        .unwrap_or_else(|| default_wrapper_name(&function.sig.ident));
+    let wrapper_name = match attribute.wrapper {
+        WrapperConfig::Default => Some(default_wrapper_name(&function.sig.ident)),
+        WrapperConfig::Named(name) => Some(name),
+        WrapperConfig::Disabled => None,
+    };
     let requested_wrapper_attributes = attribute.wrapper_attributes;
     let is_async = function.sig.asyncness.is_some();
     let is_const = function.sig.constness.is_some();
@@ -156,7 +173,9 @@ fn expand_opeo_with_path(
     validate_input_bindings(&function.sig.inputs)?;
     let argument_count = validate_forwarded_arguments(&function.sig.inputs)?;
     validate_out_bindings(&mut function.block)?;
-    validate_wrapper_name(&function.sig.ident, &wrapper_name)?;
+    if let Some(wrapper_name) = &wrapper_name {
+        validate_wrapper_name(&function.sig.ident, wrapper_name)?;
+    }
     if argument_count > 6 {
         return Err(Error::new_spanned(
             &function.sig.inputs,
@@ -165,16 +184,17 @@ fn expand_opeo_with_path(
     }
     let slot_lifetime = fresh_lifetime(&function, "__opeo_slot");
     let borrow_lifetime = fresh_lifetime(&function, "__opeo_borrow");
-    let wrapper_attributes = wrapper_attributes(&function.attrs, &requested_wrapper_attributes)?;
-    let original_name = function.sig.ident.clone();
     let is_method = function
         .sig
         .inputs
         .iter()
         .any(|input| matches!(input, FnArg::Receiver(_)));
-    let opeo_doc = format!(
-        "The OPEO form accepts `Out` and returns `OResult`; see [`{wrapper_name}`] for the standard wrapper.\nOPEO 版本接收 `Out` 并返回 `OResult`；标准包装函数见 [`{wrapper_name}`]。"
-    );
+    let opeo_doc = match &wrapper_name {
+        Some(wrapper_name) => format!(
+            "The OPEO form accepts `Out` and returns `OResult`; see [`{wrapper_name}`] for the standard wrapper.\nOPEO 版本接收 `Out` 并返回 `OResult`；标准包装函数见 [`{wrapper_name}`]。"
+        ),
+        None => "The OPEO form accepts `Out` and returns `OResult`; no standard wrapper is generated.\nOPEO 版本接收 `Out` 并返回 `OResult`；不会生成标准包装函数。".to_owned(),
+    };
     function.attrs.push(parse_quote!(#[doc = #opeo_doc]));
     function
         .sig
@@ -200,88 +220,98 @@ fn expand_opeo_with_path(
         mut out: #runtime_path::Out<#slot_lifetime, #borrow_lifetime, #error_type>
     ));
 
-    let mut wrapper_signature = if is_const {
-        let mut signature = original_function.sig.clone();
-        signature.ident = wrapper_name.clone();
-        signature
-    } else {
-        let mut signature = function.sig.clone();
-        signature.ident = wrapper_name.clone();
-        signature.generics.params = signature
-            .generics
-            .params
-            .into_iter()
-            .filter(|parameter| match parameter {
-                GenericParam::Lifetime(lifetime) => {
-                    lifetime.lifetime != slot_lifetime && lifetime.lifetime != borrow_lifetime
-                }
-                GenericParam::Type(_) | GenericParam::Const(_) => true,
-            })
-            .collect();
-        for input in &mut signature.inputs {
-            if let FnArg::Typed(argument) = input {
-                if let Pat::Ident(pattern) = argument.pat.as_mut() {
-                    pattern.mutability = None;
+    let wrapper = if let Some(wrapper_name) = wrapper_name {
+        let wrapper_attributes =
+            wrapper_attributes(&original_function.attrs, &requested_wrapper_attributes)?;
+        let mut wrapper_signature = if is_const {
+            let mut signature = original_function.sig.clone();
+            signature.ident = wrapper_name.clone();
+            signature
+        } else {
+            let mut signature = function.sig.clone();
+            signature.ident = wrapper_name;
+            signature.generics.params = signature
+                .generics
+                .params
+                .into_iter()
+                .filter(|parameter| match parameter {
+                    GenericParam::Lifetime(lifetime) => {
+                        lifetime.lifetime != slot_lifetime && lifetime.lifetime != borrow_lifetime
+                    }
+                    GenericParam::Type(_) | GenericParam::Const(_) => true,
+                })
+                .collect();
+            for input in &mut signature.inputs {
+                if let FnArg::Typed(argument) = input {
+                    if let Pat::Ident(pattern) = argument.pat.as_mut() {
+                        pattern.mutability = None;
+                    }
                 }
             }
+            signature.inputs.pop();
+            signature.output = original_output;
+            signature
+        };
+
+        let call_arguments = wrapper_argument_idents(&wrapper_signature);
+        let mut arguments = call_arguments.iter();
+        for input in &mut wrapper_signature.inputs {
+            if let FnArg::Typed(input) = input {
+                let Some(argument) = arguments.next() else {
+                    return Err(Error::new_spanned(
+                        input,
+                        "could not create a wrapper argument for this parameter",
+                    ));
+                };
+                *input.pat = parse_quote!(#argument);
+            }
         }
-        signature.inputs.pop();
-        signature.output = original_output;
-        signature
+
+        let original_name = &function.sig.ident;
+        let wrapper_doc = format!(
+            "Standard `Result` wrapper; see [`{original_name}`] for the OPEO form.\n标准 `Result` 包装函数；OPEO 版本见 [`{original_name}`]。"
+        );
+        let call_arguments = call_arguments.iter();
+        let call_target = if is_method {
+            quote!(self.#original_name)
+        } else {
+            quote!(#original_name)
+        };
+        let call = if wrapper_signature.unsafety.is_some() {
+            quote!(unsafe { #call_target(#(#call_arguments,)* out) })
+        } else {
+            quote!(#call_target(#(#call_arguments,)* out))
+        };
+        let call = if is_async { quote!(#call.await) } else { call };
+        let slot_ident = fresh_local_ident(&wrapper_signature, "__opeo_err_slot");
+        let wrapper_body = if is_const {
+            let body = &original_function.block;
+            quote!(#body)
+        } else if is_async {
+            quote!({
+                let mut #slot_ident = #runtime_path::ErrSlot::<#error_type>::new();
+                #slot_ident.call_async(async move |out| { #call }).await
+            })
+        } else {
+            quote!({
+                let mut #slot_ident = #runtime_path::ErrSlot::<#error_type>::new();
+                #slot_ident.call(|out| #call)
+            })
+        };
+
+        quote! {
+            #(#wrapper_attributes)*
+            #[doc = #wrapper_doc]
+            #wrapper_signature
+            #wrapper_body
+        }
+    } else {
+        quote!()
     };
 
-    let call_arguments = wrapper_argument_idents(&wrapper_signature);
-    let mut arguments = call_arguments.iter();
-    for input in &mut wrapper_signature.inputs {
-        if let FnArg::Typed(input) = input {
-            let Some(argument) = arguments.next() else {
-                return Err(Error::new_spanned(
-                    input,
-                    "could not create a wrapper argument for this parameter",
-                ));
-            };
-            *input.pat = parse_quote!(#argument);
-        }
-    }
-
-    let wrapper_doc = format!(
-        "Standard `Result` wrapper; see [`{original_name}`] for the OPEO form.\n标准 `Result` 包装函数；OPEO 版本见 [`{original_name}`]。"
-    );
-    let original_name = &function.sig.ident;
-    let call_arguments = call_arguments.iter();
-    let call_target = if is_method {
-        quote!(self.#original_name)
-    } else {
-        quote!(#original_name)
-    };
-    let call = if wrapper_signature.unsafety.is_some() {
-        quote!(unsafe { #call_target(#(#call_arguments,)* out) })
-    } else {
-        quote!(#call_target(#(#call_arguments,)* out))
-    };
-    let call = if is_async { quote!(#call.await) } else { call };
-    let slot_ident = fresh_local_ident(&wrapper_signature, "__opeo_err_slot");
-    let wrapper_body = if is_const {
-        let body = &original_function.block;
-        quote!(#body)
-    } else if is_async {
-        quote!({
-            let mut #slot_ident = #runtime_path::ErrSlot::<#error_type>::new();
-            #slot_ident.call_async(async move |out| { #call }).await
-        })
-    } else {
-        quote!({
-            let mut #slot_ident = #runtime_path::ErrSlot::<#error_type>::new();
-            #slot_ident.call(|out| #call)
-        })
-    };
     Ok(quote! {
         #function
-
-        #(#wrapper_attributes)*
-        #[doc = #wrapper_doc]
-        #wrapper_signature
-        #wrapper_body
+        #wrapper
     })
 }
 
@@ -1089,6 +1119,36 @@ mod tests {
         assert!(!wrapper_docs.contains("The OPEO form accepts"));
     }
 
+    #[test]
+    fn disabled_wrapper_expands_to_only_the_opeo_function() {
+        let Some(attribute) = ok_or_return(syn::parse2::<OpeoArgs>(quote!(wrapper = false))) else {
+            return;
+        };
+        let function: syn::ItemFn = parse_quote! {
+            pub fn parse(input: &str) -> Result<u32, ParseError> {
+                Ok(input.len() as u32)
+            }
+        };
+        let Some(expansion) = ok_or_return(expand_opeo_with_path(
+            attribute,
+            function,
+            parse_quote!(::opeo),
+        )) else {
+            return;
+        };
+        let Some(file) = ok_or_return(syn::parse2::<syn::File>(expansion)) else {
+            return;
+        };
+
+        assert_eq!(file.items.len(), 1);
+        let Some(syn::Item::Fn(function)) = file.items.first() else {
+            return;
+        };
+        let docs = doc_attribute_values(function);
+        assert!(docs.contains("no standard wrapper is generated"));
+        assert!(!docs.contains("see [`"));
+    }
+
     fn doc_attribute_values(function: &syn::ItemFn) -> String {
         function
             .attrs
@@ -1129,7 +1189,7 @@ mod tests {
             return;
         };
 
-        assert!(arguments.wrapper_name.is_none());
+        assert!(matches!(arguments.wrapper, super::WrapperConfig::Default));
         assert_eq!(arguments.wrapper_attributes.len(), 1);
         let path = arguments.wrapper_attributes.first();
         assert_eq!(

@@ -6,6 +6,8 @@ extern crate self as opeo;
 
 use core::{fmt, hint::unreachable_unchecked, marker::PhantomData, ops::AsyncFnOnce, ptr::NonNull};
 
+/// Converts a `Result` function into an OPEO entry and optionally generates a wrapper.
+/// 将 `Result` 函数转换为 OPEO 入口，并可选择生成包装函数。
 pub use opeo_macros::opeo;
 
 #[must_use]
@@ -41,13 +43,13 @@ impl<'slot, T> OResult<'slot, T> {
     /// Returns `true` when this result contains a success value.
     /// 当结果包含成功值时返回 `true`。
     pub const fn is_ok(&self) -> bool {
-        matches!(&self.value, Ok(_))
+        self.value.is_ok()
     }
 
     /// Returns `true` when this result represents a failure.
     /// 当结果表示失败时返回 `true`。
     pub const fn is_err(&self) -> bool {
-        matches!(&self.value, Err(_))
+        self.value.is_err()
     }
 
     /// Maps a success value while preserving a failure for this slot.
