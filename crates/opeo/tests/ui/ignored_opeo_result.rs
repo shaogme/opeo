@@ -3,7 +3,7 @@
 use opeo::{ErrSlot, OResult, Out};
 
 fn fail<'slot, 'borrow>(out: Out<'slot, 'borrow, ()>) -> OResult<'slot, ()> {
-    OResult::__from_failed(out.fail(()))
+    OResult::failed(out.fail(()))
 }
 
 fn main() {

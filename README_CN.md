@@ -22,6 +22,10 @@ OPEO 函数返回 OResult<'slot, T>
 
 `OResult` 保存成功值或零大小的失败标记；错误本身写入 `ErrSlot<E>`。生命周期品牌将失败标记与实际收到错误的槽位关联起来。`ErrSlot::call` 将该接口桥接回 `Result<T, E>`；`ErrSlot::try_call` 则返回 `Caught` 借用，供调用方检查或取走槽位中的错误。
 
+`OResult` 提供 `is_ok`、`is_err`、`map` 和 `and_then`，便于检查状态并组合成功路径；`and_then` 的后续计算必须返回绑定到同一槽位的 `OResult`。异步调用也可以用 `ErrSlot::try_call_async` 检查借用错误。
+
+`Out::edit` 会将错误写入槽位并返回 `OutEdit`。编辑器可借用或修改错误；只有 `commit` 会生成 `Failed`。如果编辑器在提交前被丢弃，槽位会恢复为编辑开始前的值。
+
 实现不会为错误槽分配堆内存，运行时也不依赖 `std`。错误类型 `E` 自身如何存储由它决定，因此它仍可能分配内存。在受测配置中，`OResult<T>` 与 `Result<T, ()>` 布局相同；调用方应依赖公开 API，而不要依赖私有表示细节。
 
 ## 安装
@@ -74,7 +78,7 @@ assert_eq!(parse_positive_std("0"), Err(ParseError::Zero));
 
 ## 检查或取走错误
 
-失败时，`try_call` 返回 `Caught`。`get` 借用错误，`take` 将错误从槽位中移出。如果丢弃 `Caught` 时尚未取走错误，槽位中的错误也会被析构。
+失败时，`try_call` 返回 `Caught`。`get` 借用错误，`get_mut` 可变借用错误，`take` 将错误从槽位中移出。如果丢弃 `Caught` 时尚未取走错误，槽位中的错误也会被析构。异步 OPEO 调用可使用 `try_call_async` 获得相同的检查能力。
 
 ```rust
 use opeo::{opeo, ErrSlot};
@@ -130,15 +134,36 @@ assert_eq!(errors.call(|out| parse_number("17", out)), Ok(17));
 
 `Out::reborrow` 会在当前句柄的可变借用内创建生命周期更短的句柄，可用于嵌套 OPEO 调用。这样调用方可以传播同一槽位上的 `OResult`，而借用检查器会阻止混用不同槽位的失败状态。
 
+需要在提交前补充错误上下文时，可通过 `Out::edit` 原位修改槽位中的错误：
+
+```rust
+use opeo::{ErrSlot, OResult};
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParseError {
+    context: Option<&'static str>,
+}
+
+let mut errors = ErrSlot::<ParseError>::new();
+let result = errors.call(|out| {
+    let mut edit = out.edit(ParseError { context: None });
+    edit.get_mut().context = Some("header");
+    OResult::<()>::failed(edit.commit())
+});
+
+assert_eq!(result, Err(ParseError { context: Some("header") }));
+```
+
 ## 公开 API
 
 | 项目 | 用途 |
 | --- | --- |
-| `ErrSlot<E>` | 持有错误存储。用 `call` 返回标准 `Result`，或用 `try_call` 获取借用错误 `Caught`。 |
-| `Out<'slot, 'borrow, E>` | 用 `fail` 将错误写入槽位，用 `reborrow` 创建嵌套句柄。 |
-| `OResult<'slot, T>` | 返回成功值，或返回绑定到某个槽位的失败状态。 |
-| `Failed<'slot>` | 由 `Out::fail` 生成并用于构造失败结果的凭证。 |
-| `Caught<'slot, E>` | 借用已存储的错误；用 `get` 检查，用 `take` 获取所有权。 |
+| `ErrSlot<E>` | 持有错误存储。用 `call`/`call_async` 返回标准 `Result`，或用 `try_call`/`try_call_async` 获取借用错误 `Caught`。 |
+| `Out<'slot, 'borrow, E>` | 用 `fail` 写入并提交错误，用 `edit` 原位编辑待提交错误，用 `reborrow` 创建嵌套句柄。 |
+| `OutEdit<'slot, 'borrow, E>` | 借用或修改槽位中的错误；用 `commit` 生成失败凭证，未提交时丢弃会恢复原值。 |
+| `OResult<'slot, T>` | 返回成功值，或返回绑定到某个槽位的失败状态；支持状态检查和成功值组合。 |
+| `Failed<'slot>` | 由 `Out::fail` 或 `OutEdit::commit` 生成并用于构造失败结果的凭证。 |
+| `Caught<'slot, E>` | 借用已存储的错误；用 `get`/`get_mut` 检查或修改，用 `take` 获取所有权。 |
 | `ResultOutExt` | 使用 `or_out`、`or_out_with` 或 `or_out_into` 将标准 `Result` 转成 `OResult`。 |
 | `bail!` | 写入错误并从 OPEO 函数提前返回。 |
 | `ensure!` | 条件为假时写入错误并提前返回。 |

@@ -186,12 +186,7 @@ fn parse_slot_argument(slot: u8, __opeo_err_slot: u8) -> Result<u16, ParseError>
 
 #[opeo(wrapper = sum_six_std)]
 fn sum_six(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Result<u16, ParseError> {
-    Ok(u16::from(a)
-        + u16::from(b)
-        + u16::from(c)
-        + u16::from(d)
-        + u16::from(e)
-        + u16::from(f))
+    Ok(u16::from(a) + u16::from(b) + u16::from(c) + u16::from(d) + u16::from(e) + u16::from(f))
 }
 
 #[opeo(wrapper = parse_alias_std)]
@@ -310,7 +305,7 @@ fn nested_failure<'slot, 'borrow>(mut out: Out<'slot, 'borrow, ParseError>) -> O
 }
 
 fn nested_leaf<'slot, 'borrow>(out: Out<'slot, 'borrow, ParseError>) -> OResult<'slot, u8> {
-    OResult::__from_failed(out.fail(ParseError::Empty))
+    OResult::failed(out.fail(ParseError::Empty))
 }
 
 fn missing_value<'slot, 'borrow>(

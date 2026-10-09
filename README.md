@@ -22,6 +22,10 @@ caller receives success T or handles the error in the slot
 
 `OResult` stores either a success value or a zero-sized failure marker; the error itself is written into the `ErrSlot<E>`. Its lifetime brand ties the failure marker to the slot that received the error. `ErrSlot::call` bridges this interface back to `Result<T, E>`, while `ErrSlot::try_call` returns a `Caught` borrow so the caller can inspect or take the stored error.
 
+`OResult` provides `is_ok`, `is_err`, `map`, and `and_then` for inspecting the state and composing success paths. The closure passed to `and_then` must return an `OResult` branded for the same slot. Asynchronous calls can use `ErrSlot::try_call_async` to inspect a borrowed error as well.
+
+`Out::edit` writes an error into the slot and returns an `OutEdit`. The editor can borrow or modify the error; only `commit` produces a `Failed` proof. Dropping the editor before commit restores the slot's previous value.
+
 The implementation uses no heap allocation for the slot and keeps the runtime independent of `std`. The error type `E` controls its own storage and may, of course, allocate. `OResult<T>` has the same layout as `Result<T, ()>` in the tested configurations; callers should rely on the public API rather than private representation details.
 
 ## Install
@@ -74,7 +78,7 @@ The generated `parse_positive_std` has the original `Result<u32, ParseError>` in
 
 ## Inspect or take an error
 
-`try_call` gives access to a `Caught` value on failure. `get` borrows the error; `take` moves it out of the slot. If a `Caught` value is dropped without taking the error, the stored error is dropped too.
+`try_call` gives access to a `Caught` value on failure. `get` borrows the error, `get_mut` mutably borrows it, and `take` moves it out of the slot. If a `Caught` value is dropped without taking the error, the stored error is dropped too. Use `try_call_async` for the same inspection behavior with an asynchronous OPEO call.
 
 ```rust
 use opeo::{opeo, ErrSlot};
@@ -130,15 +134,36 @@ assert_eq!(errors.call(|out| parse_number("17", out)), Ok(17));
 
 `Out::reborrow` creates a shorter mutable borrow for nested OPEO calls. This lets a caller propagate an `OResult` from the same slot while the borrow checker prevents mixing failure states from unrelated slots.
 
+Use `Out::edit` to enrich an error in place before committing it:
+
+```rust
+use opeo::{ErrSlot, OResult};
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParseError {
+    context: Option<&'static str>,
+}
+
+let mut errors = ErrSlot::<ParseError>::new();
+let result = errors.call(|out| {
+    let mut edit = out.edit(ParseError { context: None });
+    edit.get_mut().context = Some("header");
+    OResult::<()>::failed(edit.commit())
+});
+
+assert_eq!(result, Err(ParseError { context: Some("header") }));
+```
+
 ## Public API
 
 | Item | Purpose |
 | --- | --- |
-| `ErrSlot<E>` | Owns the error storage. Use `call` for a standard `Result`, or `try_call` for a borrowed `Caught` error. |
-| `Out<'slot, 'borrow, E>` | Writes an error into the slot with `fail`, and creates nested handles with `reborrow`. |
-| `OResult<'slot, T>` | Returns a success value or a failure branded for one slot. |
-| `Failed<'slot>` | Proof produced by `Out::fail` and used to construct a failure result. |
-| `Caught<'slot, E>` | Borrows the stored error; use `get` to inspect it and `take` to own it. |
+| `ErrSlot<E>` | Owns the error storage. Use `call`/`call_async` for a standard `Result`, or `try_call`/`try_call_async` for a borrowed `Caught` error. |
+| `Out<'slot, 'borrow, E>` | Writes and commits an error with `fail`, edits a pending error in place with `edit`, and creates nested handles with `reborrow`. |
+| `OutEdit<'slot, 'borrow, E>` | Borrows or modifies the error in the slot; `commit` produces a failure proof, while dropping it uncommitted restores the previous value. |
+| `OResult<'slot, T>` | Returns a success value or a failure branded for one slot; supports state checks and success value composition. |
+| `Failed<'slot>` | Proof produced by `Out::fail` or `OutEdit::commit` and used to construct a failure result. |
+| `Caught<'slot, E>` | Borrows the stored error; use `get`/`get_mut` to inspect or modify it and `take` to own it. |
 | `ResultOutExt` | Converts a standard `Result` to `OResult` with `or_out`, `or_out_with`, or `or_out_into`. |
 | `bail!` | Writes an error and returns early from an OPEO function. |
 | `ensure!` | Returns early with an error when a condition is false. |

@@ -671,7 +671,7 @@ impl RewriteTry {
         };
         let runtime_path = &self.runtime_path;
         if is_error {
-            *expression = parse_quote!(#runtime_path::OResult::__from_failed(
+            *expression = parse_quote!(#runtime_path::OResult::failed(
                 out.reborrow().fail(#value)
             ));
         } else {

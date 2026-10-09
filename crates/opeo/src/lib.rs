@@ -38,10 +38,46 @@ impl<'slot, T> OResult<'slot, T> {
         }
     }
 
+    /// Returns `true` when this result contains a success value.
+    /// 当结果包含成功值时返回 `true`。
+    pub const fn is_ok(&self) -> bool {
+        matches!(&self.value, Ok(_))
+    }
+
+    /// Returns `true` when this result represents a failure.
+    /// 当结果表示失败时返回 `true`。
+    pub const fn is_err(&self) -> bool {
+        matches!(&self.value, Err(_))
+    }
+
+    /// Maps a success value while preserving a failure for this slot.
+    /// 转换成功值，同时保留绑定到当前槽位的失败状态。
+    pub fn map<U>(self, map: impl FnOnce(T) -> U) -> OResult<'slot, U> {
+        match self.value {
+            Ok(value) => OResult::success(map(value)),
+            Err(()) => OResult {
+                value: Err(()),
+                slot: PhantomData,
+            },
+        }
+    }
+
+    /// Chains a success value into another result for the same slot.
+    /// 将成功值继续传入绑定到同一槽位的结果计算。
+    pub fn and_then<U>(self, next: impl FnOnce(T) -> OResult<'slot, U>) -> OResult<'slot, U> {
+        match self.value {
+            Ok(value) => next(value),
+            Err(()) => OResult {
+                value: Err(()),
+                slot: PhantomData,
+            },
+        }
+    }
+
     /// Creates a failure result from a real failure proof.
     /// 根据真实失败凭证创建失败结果。
     #[doc(hidden)]
-    pub const fn __from_failed(_failure: Failed<'slot>) -> Self {
+    pub const fn failed(_failure: Failed<'slot>) -> Self {
         Self {
             value: Err(()),
             slot: PhantomData,
@@ -94,9 +130,19 @@ pub struct Out<'slot, 'borrow, E>(
 impl<'slot, 'borrow, E> Out<'slot, 'borrow, E> {
     /// Writes an error and returns a failure proof; a new write replaces the old value.
     /// 写入错误并生成失败凭证；重复写入时新值替换旧值。
-    pub fn fail(mut self, error: E) -> Failed<'slot> {
-        drop(self.state_mut().value.replace(error));
-        Failed(PhantomData)
+    pub fn fail(self, error: E) -> Failed<'slot> {
+        self.edit(error).commit()
+    }
+
+    /// Writes an error into the slot and returns an editor for it.
+    /// 将错误写入槽位，并返回用于编辑该错误的编辑器。
+    pub fn edit(mut self, error: E) -> OutEdit<'slot, 'borrow, E> {
+        let previous = self.state_mut().value.replace(error);
+        OutEdit {
+            out: self,
+            previous,
+            committed: false,
+        }
     }
 
     /// Creates a child handle within this handle's mutable borrow.
@@ -109,6 +155,70 @@ impl<'slot, 'borrow, E> Out<'slot, 'borrow, E> {
         // SAFETY: try_call creates this pointer during an exclusive borrow; the safe API cannot copy Out or let it outlive that borrow.
         // 安全性：该指针仅由 try_call 在独占借用期间构造；安全 API 不会复制 Out 或让它逃逸该借用。
         unsafe { self.0.as_mut() }
+    }
+
+    fn state(&self) -> &ErrState<E> {
+        // SAFETY: Out's borrow brand prevents mutable aliases while this shared reference is live.
+        // 安全性：Out 的借用品牌会在该共享引用存活期间阻止可变别名。
+        unsafe { self.0.as_ref() }
+    }
+}
+
+/// Temporarily edits the error in an `Out` slot.
+/// 暂时编辑 `Out` 槽位中的错误。
+#[must_use = "commit the edited error to produce a failure proof"]
+pub struct OutEdit<'slot, 'borrow, E> {
+    out: Out<'slot, 'borrow, E>,
+    previous: Option<E>,
+    committed: bool,
+}
+
+impl<'slot, 'borrow, E> OutEdit<'slot, 'borrow, E> {
+    /// Borrows the edited error.
+    /// 借用正在编辑的错误。
+    pub fn get(&self) -> &E {
+        match self.out.state().value.as_ref() {
+            Some(error) => error,
+            None => {
+                // SAFETY: OutEdit writes an error before it is constructed and exposes no way to remove it.
+                // 安全性：OutEdit 构造前会写入错误，且不提供移除错误的接口。
+                unsafe { unreachable_unchecked() }
+            }
+        }
+    }
+
+    /// Mutably borrows the edited error.
+    /// 可变借用正在编辑的错误。
+    pub fn get_mut(&mut self) -> &mut E {
+        match self.out.state_mut().value.as_mut() {
+            Some(error) => error,
+            None => {
+                // SAFETY: OutEdit writes an error before it is constructed and exposes no way to remove it.
+                // 安全性：OutEdit 构造前会写入错误，且不提供移除错误的接口。
+                unsafe { unreachable_unchecked() }
+            }
+        }
+    }
+
+    /// Commits the edited error and returns its failure proof.
+    /// 提交编辑后的错误，并返回对应的失败凭证。
+    pub fn commit(mut self) -> Failed<'slot> {
+        self.committed = true;
+        drop(self.previous.take());
+        Failed(PhantomData)
+    }
+}
+
+impl<E> Drop for OutEdit<'_, '_, E> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let state = self.out.state_mut();
+            let edited = state.value.take();
+            state.value = self.previous.take();
+            // Restore before dropping the edit so a panic in its destructor preserves any earlier failure proof.
+            // 先恢复原值再析构编辑值，确保其析构发生 panic 时仍保留先前失败凭证对应的错误。
+            drop(edited);
+        }
     }
 }
 
@@ -137,6 +247,37 @@ impl<E> ErrSlot<E> {
         let mut guard = InitGuard::new(&mut self.state);
         let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
         let result = f(out);
+
+        match result.__into_result() {
+            Ok(value) => {
+                guard.drop_error();
+                guard.disarm();
+                Ok(value)
+            }
+            Err(_failure) => {
+                if guard.state_mut().value.is_none() {
+                    // SAFETY: A safely constructed failure can only use a proof that wrote this slot.
+                    // 安全性：安全构造的失败结果只能来自已写入当前槽位的凭证。
+                    unsafe { unreachable_unchecked() };
+                }
+                guard.disarm();
+                Err(Caught {
+                    state: &mut self.state,
+                })
+            }
+        }
+    }
+
+    /// Returns a borrowable error from an asynchronous OPEO call.
+    /// 调用异步 OPEO 函数，并在失败时返回可借用的错误。
+    pub async fn try_call_async<T>(
+        &mut self,
+        f: impl for<'slot> AsyncFnOnce(Out<'slot, 'slot, E>) -> OResult<'slot, T>,
+    ) -> Result<T, Caught<'_, E>> {
+        drop(self.state.value.take());
+        let mut guard = InitGuard::new(&mut self.state);
+        let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
+        let result = f(out).await;
 
         match result.__into_result() {
             Ok(value) => {
@@ -243,6 +384,19 @@ impl<E> Caught<'_, E> {
         }
     }
 
+    /// Mutably borrows the error stored in the slot.
+    /// 可变借用槽位中的错误。
+    pub fn get_mut(&mut self) -> &mut E {
+        match self.state.value.as_mut() {
+            Some(error) => error,
+            None => {
+                // SAFETY: Caught can only be constructed while the error is initialized.
+                // 安全性：Caught 只能在错误已初始化时构造。
+                unsafe { unreachable_unchecked() }
+            }
+        }
+    }
+
     /// Takes ownership of the error from the slot.
     /// 从槽位取走错误。
     pub fn take(self) -> E {
@@ -333,7 +487,7 @@ impl<T, E> ResultOutExt<T, E> for Result<T, E> {
     ) -> OResult<'slot, T> {
         match self {
             Ok(value) => OResult::success(value),
-            Err(error) => OResult::__from_failed(out.fail(convert(error))),
+            Err(error) => OResult::failed(out.fail(convert(error))),
         }
     }
 
@@ -361,7 +515,7 @@ where
     fn __opeo_try<'borrow>(self, out: Out<'slot, 'borrow, Target>) -> OResult<'slot, T> {
         match self {
             Ok(value) => OResult::success(value),
-            Err(error) => OResult::__from_failed(out.fail(Target::from(error))),
+            Err(error) => OResult::failed(out.fail(Target::from(error))),
         }
     }
 }
@@ -377,7 +531,7 @@ impl<'slot, T, E> __OpeoTry<'slot, T, E> for OResult<'slot, T> {
 #[macro_export]
 macro_rules! bail {
     ($out:expr, $error:expr $(,)?) => {
-        return $crate::OResult::__from_failed(($out).reborrow().fail($error));
+        return $crate::OResult::failed(($out).reborrow().fail($error));
     };
 }
 
@@ -387,7 +541,7 @@ macro_rules! bail {
 macro_rules! ensure {
     ($out:expr, $condition:expr, $error:expr $(,)?) => {
         if !$condition {
-            return $crate::OResult::__from_failed(($out).reborrow().fail($error));
+            return $crate::OResult::failed(($out).reborrow().fail($error));
         }
     };
 }
@@ -403,7 +557,7 @@ macro_rules! __opeo_try_value {
         )) {
             ::core::result::Result::Ok(value) => value,
             ::core::result::Result::Err(failure) => {
-                return $crate::OResult::__from_failed(failure);
+                return $crate::OResult::failed(failure);
             }
         }
     };
@@ -420,7 +574,7 @@ macro_rules! opeo_try {
         match $option {
             Some(value) => value,
             None => {
-                return $crate::OResult::__from_failed(($out).reborrow().fail($error));
+                return $crate::OResult::failed(($out).reborrow().fail($error));
             }
         }
     };
