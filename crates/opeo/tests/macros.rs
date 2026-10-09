@@ -312,6 +312,62 @@ fn parse_in_closure(input: &str) -> Result<usize, ParseError> {
 #[derive(Debug, PartialEq, Eq)]
 struct GenericFailure;
 
+#[derive(Debug, PartialEq, Eq)]
+struct SourceError;
+
+#[derive(Debug, PartialEq, Eq)]
+struct GenericErrorA(SourceError);
+
+impl From<SourceError> for GenericErrorA {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GenericErrorB(SourceError);
+
+impl From<SourceError> for GenericErrorB {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+fn inner_operation(value: u32) -> Result<u32, SourceError> {
+    if value == 0 {
+        Err(SourceError)
+    } else {
+        Ok(value)
+    }
+}
+
+struct GenericService;
+
+impl GenericService {
+    #[opeo]
+    fn process_with_macro<E>(&self, value: u32) -> Result<u32, E>
+    where
+        E: From<SourceError>,
+    {
+        let value = inner_operation(value)?;
+        Ok(value + 1)
+    }
+
+    fn process_without_macro<'slot, 'borrow, E>(
+        &self,
+        value: u32,
+        out: Out<'slot, 'borrow, E>,
+    ) -> OResult<'slot, u32>
+    where
+        E: From<SourceError>,
+    {
+        match inner_operation(value) {
+            Ok(value) => OResult::success(value + 1),
+            Err(error) => OResult::failed(out.fail(error.into())),
+        }
+    }
+}
+
 #[opeo(wrapper = clone_std)]
 fn clone_value<T>(value: T) -> Result<T, GenericFailure>
 where
@@ -569,6 +625,43 @@ fn attribute_macro_does_not_duplicate_symbol_export_attributes() {
 fn attribute_macro_supports_generic_functions() {
     assert_eq!(clone_std(String::from("copy")), Ok(String::from("copy")));
     assert_eq!(higher_ranked_lifetimes_std(|_, _| {}), Ok(()));
+}
+
+#[test]
+fn generic_methods_accept_different_out_error_types() {
+    let service = GenericService;
+
+    let mut macro_errors_a = ErrSlot::<GenericErrorA>::new();
+    assert_eq!(
+        macro_errors_a.call(|out| service.process_with_macro(7, out)),
+        Ok(8)
+    );
+    assert_eq!(
+        macro_errors_a.call(|out| service.process_with_macro(0, out)),
+        Err(GenericErrorA(SourceError))
+    );
+
+    let mut macro_errors_b = ErrSlot::<GenericErrorB>::new();
+    assert_eq!(
+        macro_errors_b.call(|out| service.process_with_macro(0, out)),
+        Err(GenericErrorB(SourceError))
+    );
+
+    let mut manual_errors_a = ErrSlot::<GenericErrorA>::new();
+    assert_eq!(
+        manual_errors_a.call(|out| service.process_without_macro(7, out)),
+        Ok(8)
+    );
+    assert_eq!(
+        manual_errors_a.call(|out| service.process_without_macro(0, out)),
+        Err(GenericErrorA(SourceError))
+    );
+
+    let mut manual_errors_b = ErrSlot::<GenericErrorB>::new();
+    assert_eq!(
+        manual_errors_b.call(|out| service.process_without_macro(0, out)),
+        Err(GenericErrorB(SourceError))
+    );
 }
 
 #[test]

@@ -12,6 +12,8 @@ use syn::{
 
 /// Generates an OPEO function or method and a standard wrapper from a `Result` function.
 /// 从标准 `Result` 函数或方法生成 OPEO 入口和标准包装入口。
+/// Generic error types are preserved, so `E: From<SourceError>` can adapt errors to the caller's slot type.
+/// 泛型错误类型会被保留，因此可用 `E: From<SourceError>` 将错误转换为调用方的槽位类型。
 ///
 /// `wrapper` defaults to `<function>_std`; set it to `false` to omit the wrapper. Use
 /// `wrapper_attrs(...)` to copy selected non-symbol attributes to the generated wrapper.

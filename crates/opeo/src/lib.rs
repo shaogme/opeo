@@ -548,8 +548,10 @@ macro_rules! ensure {
     };
 }
 
-/// Bridges a `Result` or `Option` failure into the current OPEO error slot.
-/// 将 `Result` 或 `Option` 失败桥接到当前 OPEO 错误槽。
+/// Bridges a `Result` or `Option` failure into the current OPEO error slot. For a `Result`,
+/// the slot error type may differ from the source error when it implements `From<SourceError>`.
+/// 将 `Result` 或 `Option` 失败桥接到当前 OPEO 错误槽。对于 `Result`，只要槽位错误类型实现
+/// `From<SourceError>`，它就可以不同于源错误类型。
 #[macro_export]
 macro_rules! __opeo_try_value {
     ($out:expr, $result:expr $(,)?) => {
@@ -565,8 +567,10 @@ macro_rules! __opeo_try_value {
     };
 }
 
-/// Bridges a `Result` or `Option` failure into the current OPEO error slot.
-/// 将 `Result` 或 `Option` 失败桥接到当前 OPEO 错误槽。
+/// Bridges a `Result` or `Option` failure into the current OPEO error slot. For a `Result`,
+/// the slot error type may differ from the source error when it implements `From<SourceError>`.
+/// 将 `Result` 或 `Option` 失败桥接到当前 OPEO 错误槽。对于 `Result`，只要槽位错误类型实现
+/// `From<SourceError>`，它就可以不同于源错误类型。
 #[macro_export]
 macro_rules! opeo_try {
     ($out:expr, $result:expr $(,)?) => {

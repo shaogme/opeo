@@ -279,6 +279,137 @@ let mut errors = ErrSlot::<Infallible>::new();
 assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 ```
 
+### Generic methods with different slot error types
+
+When an operation inside a method returns a fixed `SourceError`, make the method's error type a generic `E` and require `E: From<SourceError>`. With `#[opeo]`, the `E` in the return type also becomes the generated `Out` error type, so the same method can accept an `Out` borrowed from different `ErrSlot<E>` values.
+
+```rust
+use opeo::{opeo, ErrSlot};
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceError;
+
+fn inner_operation(value: u32) -> Result<u32, SourceError> {
+    if value == 0 {
+        Err(SourceError)
+    } else {
+        Ok(value)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ApiError(SourceError);
+
+impl From<SourceError> for ApiError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StorageError(SourceError);
+
+impl From<SourceError> for StorageError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+struct Service;
+
+impl Service {
+    #[opeo]
+    fn process<E>(&self, value: u32) -> Result<u32, E>
+    where
+        E: From<SourceError>,
+    {
+        let value = inner_operation(value)?;
+        Ok(value + 1)
+    }
+}
+
+let service = Service;
+let mut api_errors = ErrSlot::<ApiError>::new();
+assert_eq!(api_errors.call(|out| service.process(7, out)), Ok(8));
+assert_eq!(
+    api_errors.call(|out| service.process(0, out)),
+    Err(ApiError(SourceError))
+);
+
+let mut storage_errors = ErrSlot::<StorageError>::new();
+assert_eq!(
+    storage_errors.call(|out| service.process(0, out)),
+    Err(StorageError(SourceError))
+);
+```
+
+Without `#[opeo]`, declare the error type of `Out` as a generic `E` in the method signature and convert the inner error with `From` in the failure branch:
+
+```rust
+use opeo::{ErrSlot, OResult, Out};
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceError;
+
+fn inner_operation(value: u32) -> Result<u32, SourceError> {
+    if value == 0 {
+        Err(SourceError)
+    } else {
+        Ok(value)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ApiError(SourceError);
+
+impl From<SourceError> for ApiError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StorageError(SourceError);
+
+impl From<SourceError> for StorageError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+struct Service;
+
+impl Service {
+    fn process<'slot, 'borrow, E>(
+        &self,
+        value: u32,
+        out: Out<'slot, 'borrow, E>,
+    ) -> OResult<'slot, u32>
+    where
+        E: From<SourceError>,
+    {
+        match inner_operation(value) {
+            Ok(value) => OResult::success(value + 1),
+            Err(error) => OResult::failed(out.fail(error.into())),
+        }
+    }
+}
+
+let service = Service;
+let mut api_errors = ErrSlot::<ApiError>::new();
+assert_eq!(api_errors.call(|out| service.process(7, out)), Ok(8));
+assert_eq!(
+    api_errors.call(|out| service.process(0, out)),
+    Err(ApiError(SourceError))
+);
+
+let mut storage_errors = ErrSlot::<StorageError>::new();
+assert_eq!(
+    storage_errors.call(|out| service.process(0, out)),
+    Err(StorageError(SourceError))
+);
+```
+
 ### Calling another `#[opeo]` method from a transformed method
 
 An `#[opeo]` method name refers to its OPEO entry point, so another transformed method cannot call it as `self.child(...)?`: the entry point takes an additional `Out` argument and returns `OResult`. There are two current options: call the generated standard wrapper, or explicitly pass a shorter borrow of the same error slot. If the child method uses `wrapper = false`, only the same-slot form is available.

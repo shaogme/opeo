@@ -279,6 +279,137 @@ let mut errors = ErrSlot::<Infallible>::new();
 assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 ```
 
+### 泛型方法接受不同的槽位错误类型
+
+如果方法内部操作返回固定的 `SourceError`，可以把方法最终返回的错误类型设为泛型 `E`，并约束 `E: From<SourceError>`。使用 `#[opeo]` 时，返回类型中的 `E` 也会成为生成的 `Out` 错误类型；这样同一个方法就能接收不同 `ErrSlot<E>` 借出的 `Out`。
+
+```rust
+use opeo::{opeo, ErrSlot};
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceError;
+
+fn inner_operation(value: u32) -> Result<u32, SourceError> {
+    if value == 0 {
+        Err(SourceError)
+    } else {
+        Ok(value)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ApiError(SourceError);
+
+impl From<SourceError> for ApiError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StorageError(SourceError);
+
+impl From<SourceError> for StorageError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+struct Service;
+
+impl Service {
+    #[opeo]
+    fn process<E>(&self, value: u32) -> Result<u32, E>
+    where
+        E: From<SourceError>,
+    {
+        let value = inner_operation(value)?;
+        Ok(value + 1)
+    }
+}
+
+let service = Service;
+let mut api_errors = ErrSlot::<ApiError>::new();
+assert_eq!(api_errors.call(|out| service.process(7, out)), Ok(8));
+assert_eq!(
+    api_errors.call(|out| service.process(0, out)),
+    Err(ApiError(SourceError))
+);
+
+let mut storage_errors = ErrSlot::<StorageError>::new();
+assert_eq!(
+    storage_errors.call(|out| service.process(0, out)),
+    Err(StorageError(SourceError))
+);
+```
+
+不使用 `#[opeo]` 时，在方法签名中直接把 `Out` 的错误类型写为泛型 `E`，并在失败分支用 `From` 转换内部错误：
+
+```rust
+use opeo::{ErrSlot, OResult, Out};
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceError;
+
+fn inner_operation(value: u32) -> Result<u32, SourceError> {
+    if value == 0 {
+        Err(SourceError)
+    } else {
+        Ok(value)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ApiError(SourceError);
+
+impl From<SourceError> for ApiError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StorageError(SourceError);
+
+impl From<SourceError> for StorageError {
+    fn from(error: SourceError) -> Self {
+        Self(error)
+    }
+}
+
+struct Service;
+
+impl Service {
+    fn process<'slot, 'borrow, E>(
+        &self,
+        value: u32,
+        out: Out<'slot, 'borrow, E>,
+    ) -> OResult<'slot, u32>
+    where
+        E: From<SourceError>,
+    {
+        match inner_operation(value) {
+            Ok(value) => OResult::success(value + 1),
+            Err(error) => OResult::failed(out.fail(error.into())),
+        }
+    }
+}
+
+let service = Service;
+let mut api_errors = ErrSlot::<ApiError>::new();
+assert_eq!(api_errors.call(|out| service.process(7, out)), Ok(8));
+assert_eq!(
+    api_errors.call(|out| service.process(0, out)),
+    Err(ApiError(SourceError))
+);
+
+let mut storage_errors = ErrSlot::<StorageError>::new();
+assert_eq!(
+    storage_errors.call(|out| service.process(0, out)),
+    Err(StorageError(SourceError))
+);
+```
+
 ### 在被改写的方法中调用其他 `#[opeo]` 方法
 
 `#[opeo]` 方法名对应 OPEO 入口，因此不能在另一个被改写的方法中直接写 `self.child(...)?`：入口需要额外的 `Out` 参数，并返回 `OResult`。目前有两种写法：通过生成的标准包装方法调用，或显式传递同一个错误槽的短期借用。如果子方法设置了 `wrapper = false`，只能使用同槽位写法。
