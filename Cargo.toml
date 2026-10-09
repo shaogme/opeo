@@ -14,7 +14,7 @@ documentation = "https://docs.rs/opeo"
 keywords = ["error-handling", "out-parameters"]
 
 [workspace.dependencies]
-opeo-macros = { path = "crates/opeo-macros", version = "0.1.2" }
+opeo-macros = { path = "crates/opeo-macros", version = "0.1.3" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

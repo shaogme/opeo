@@ -279,6 +279,35 @@ let mut errors = ErrSlot::<Infallible>::new();
 assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 ```
 
+## Trait methods
+
+Apply `#[opeo]` to a required or default method in a trait to add the OPEO signature and a default standard wrapper to the trait. Applying the attribute to the implementation transforms its body and generates the standard wrapper implementation as well.
+
+```rust
+use core::convert::Infallible;
+use opeo::{opeo, ErrSlot};
+
+trait Counter {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, Infallible>;
+}
+
+struct SimpleCounter(u32);
+
+impl Counter for SimpleCounter {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, Infallible> {
+        Ok(self.0 + amount)
+    }
+}
+
+let counter = SimpleCounter(5);
+assert_eq!(counter.add_std(3), Ok(8));
+
+let mut errors = ErrSlot::<Infallible>::new();
+assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
+```
+
 ### Generic methods with different slot error types
 
 When an operation inside a method returns a fixed `SourceError`, make the method's error type a generic `E` and require `E: From<SourceError>`. With `#[opeo]`, the `E` in the return type also becomes the generated `Out` error type, so the same method can accept an `Out` borrowed from different `ErrSlot<E>` values.

@@ -279,6 +279,35 @@ let mut errors = ErrSlot::<Infallible>::new();
 assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 ```
 
+## Trait 方法
+
+在 trait 的必需方法或带默认函数体的方法上添加 `#[opeo]`，会将方法转换为 OPEO 形式，并为 trait 添加一个默认的标准包装方法。在 trait 实现的方法上添加该属性，则会转换函数体并生成标准包装方法的实现。
+
+```rust
+use core::convert::Infallible;
+use opeo::{opeo, ErrSlot};
+
+trait Counter {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, Infallible>;
+}
+
+struct SimpleCounter(u32);
+
+impl Counter for SimpleCounter {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, Infallible> {
+        Ok(self.0 + amount)
+    }
+}
+
+let counter = SimpleCounter(5);
+assert_eq!(counter.add_std(3), Ok(8));
+
+let mut errors = ErrSlot::<Infallible>::new();
+assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
+```
+
 ### 泛型方法接受不同的槽位错误类型
 
 如果方法内部操作返回固定的 `SourceError`，可以把方法最终返回的错误类型设为泛型 `E`，并约束 `E: From<SourceError>`。使用 `#[opeo]` 时，返回类型中的 `E` 也会成为生成的 `Out` 错误类型；这样同一个方法就能接收不同 `ErrSlot<E>` 借出的 `Out`。

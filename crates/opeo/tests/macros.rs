@@ -91,6 +91,30 @@ impl Counter {
     }
 }
 
+trait TraitCounter {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, ParseError>;
+
+    #[opeo]
+    fn default_value(&self) -> Result<u32, ParseError> {
+        Ok(40)
+    }
+}
+
+struct TraitCounterImpl {
+    value: u32,
+}
+
+impl TraitCounter for TraitCounterImpl {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, ParseError> {
+        if amount == 0 {
+            return Err(ParseError::Zero);
+        }
+        Ok(self.value + amount)
+    }
+}
+
 async fn parse_async(input: &str) -> Result<u32, ParseIntError> {
     input.parse()
 }
@@ -443,6 +467,19 @@ fn attribute_macro_supports_struct_instance_methods() {
     assert_eq!(counter.increment_std(0), Err(ParseError::Zero));
     assert_eq!(slot.call(|out| counter.increment(2, out)), Ok(10));
     assert_eq!(counter.consume_std(), Ok(10));
+}
+
+#[test]
+fn attribute_macro_supports_trait_methods_and_implementations() {
+    let counter = TraitCounterImpl { value: 5 };
+    assert_eq!(counter.add_std(3), Ok(8));
+    assert_eq!(counter.add_std(0), Err(ParseError::Zero));
+    assert_eq!(counter.default_value_std(), Ok(40));
+
+    let mut slot = ErrSlot::<ParseError>::new();
+    assert_eq!(slot.call(|out| counter.add(4, out)), Ok(9));
+    assert_eq!(slot.call(|out| counter.add(0, out)), Err(ParseError::Zero));
+    assert_eq!(slot.call(|out| counter.default_value(out)), Ok(40));
 }
 
 #[test]

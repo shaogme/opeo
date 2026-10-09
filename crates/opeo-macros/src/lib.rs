@@ -3,15 +3,15 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Block, Error, Expr, ExprCall, ExprPath, FnArg, GenericParam, Ident, ItemFn,
-    Lifetime, LitBool, Meta, Pat, PatIdent, Path, ReturnType, Stmt, Token, Type,
+    Lifetime, LitBool, Meta, Pat, PatIdent, Path, ReturnType, Stmt, Token, TraitItemFn, Type,
     parse::{Parse, ParseStream, Parser},
     parse_macro_input, parse_quote,
     punctuated::Punctuated,
     visit_mut::{self, VisitMut},
 };
 
-/// Generates an OPEO function or method and a standard wrapper from a `Result` function.
-/// 从标准 `Result` 函数或方法生成 OPEO 入口和标准包装入口。
+/// Generates an OPEO function or method, including trait methods, and a standard wrapper from a `Result` function.
+/// 从标准 `Result` 函数或方法（包括 trait 方法）生成 OPEO 入口和标准包装入口。
 /// Generic error types are preserved, so `E: From<SourceError>` can adapt errors to the caller's slot type.
 /// 泛型错误类型会被保留，因此可用 `E: From<SourceError>` 将错误转换为调用方的槽位类型。
 ///
@@ -21,9 +21,18 @@ use syn::{
 #[proc_macro_attribute]
 pub fn opeo(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let attribute = parse_macro_input!(attribute as OpeoArgs);
-    let function = parse_macro_input!(item as ItemFn);
+    let item = proc_macro2::TokenStream::from(item);
 
-    match expand_opeo(attribute, function) {
+    if let Ok(function) = syn::parse2::<ItemFn>(item.clone()) {
+        return match expand_opeo(attribute, function) {
+            Ok(tokens) => tokens.into(),
+            Err(error) => error.into_compile_error().into(),
+        };
+    }
+
+    match syn::parse2::<TraitItemFn>(item)
+        .and_then(|function| expand_trait_opeo(attribute, function))
+    {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
     }
@@ -142,6 +151,50 @@ impl Parse for OpeoArgs {
 fn expand_opeo(attribute: OpeoArgs, function: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let runtime_path = opeo_crate_path()?;
     expand_opeo_with_path(attribute, function, runtime_path)
+}
+
+fn expand_trait_opeo(
+    attribute: OpeoArgs,
+    trait_function: TraitItemFn,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let runtime_path = opeo_crate_path()?;
+    let has_default = trait_function.default.is_some();
+    let function = ItemFn {
+        attrs: trait_function.attrs,
+        vis: syn::Visibility::Inherited,
+        sig: trait_function.sig,
+        block: Box::new(trait_function.default.unwrap_or_else(|| parse_quote!({}))),
+    };
+    let expansion = expand_opeo_with_path(attribute, function, runtime_path)?;
+    let generated: syn::File = syn::parse2(expansion)?;
+    let mut trait_items = Vec::with_capacity(generated.items.len());
+
+    for (index, item) in generated.items.into_iter().enumerate() {
+        let syn::Item::Fn(function) = item else {
+            return Err(Error::new_spanned(
+                item,
+                "#[opeo] generated an unsupported item in a trait method",
+            ));
+        };
+        let attributes = function.attrs;
+        let mut signature = function.sig;
+        let body = function.block;
+
+        if index == 0 && !has_default {
+            for input in &mut signature.inputs {
+                if let FnArg::Typed(argument) = input
+                    && let Pat::Ident(pattern) = argument.pat.as_mut()
+                {
+                    pattern.mutability = None;
+                }
+            }
+            trait_items.push(quote!(#(#attributes)* #signature;));
+        } else {
+            trait_items.push(quote!(#(#attributes)* #signature #body));
+        }
+    }
+
+    Ok(quote!(#(#trait_items)*))
 }
 
 fn expand_opeo_with_path(
