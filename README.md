@@ -228,6 +228,8 @@ assert_eq!(errors.call(|out| parse("12", out)), Ok(12));
 
 The macro keeps `parse` as the OPEO entry point and does not generate `parse_std`. Call it through `ErrSlot::call` when you need a standard `Result` at the call site.
 
+When a function body ends in a `loop` with no `break` that exits that loop, the macro preserves its diverging control flow. A `?` inside the loop still writes failures to the error slot and returns early.
+
 If the return type is a type alias whose final path segment is not named `Result`, provide both success and error types so the macro can determine the OPEO signature:
 
 ```rust

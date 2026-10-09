@@ -2,8 +2,9 @@ use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Block, Error, Expr, ExprCall, ExprPath, FnArg, GenericParam, Ident, ItemFn,
-    Lifetime, LitBool, Meta, Pat, PatIdent, Path, ReturnType, Stmt, Token, TraitItemFn, Type,
+    Attribute, Block, Error, Expr, ExprBlock, ExprBreak, ExprCall, ExprForLoop, ExprLoop,
+    ExprMacro, ExprPath, ExprWhile, FnArg, GenericParam, Ident, ItemFn, Lifetime, LitBool, Meta,
+    Pat, PatIdent, Path, ReturnType, Stmt, StmtMacro, Token, TraitItemFn, Type,
     parse::{Parse, ParseStream, Parser},
     parse_macro_input, parse_quote,
     punctuated::Punctuated,
@@ -655,8 +656,8 @@ impl VisitMut for RewriteTry {
 
     fn visit_expr_return_mut(&mut self, expression: &mut syn::ExprReturn) {
         if let Some(value) = &mut expression.expr {
-            self.visit_expr_mut(value);
             self.rewrite_result_tail(value);
+            self.visit_expr_mut(value);
         }
     }
 
@@ -672,8 +673,8 @@ impl RewriteTry {
     }
 
     fn visit_function_body(&mut self, block: &mut Block) {
-        self.visit_block_mut(block);
         self.rewrite_block_tail(block);
+        self.visit_block_mut(block);
     }
 
     fn rewrite_block_tail(&mut self, block: &mut Block) {
@@ -711,6 +712,7 @@ impl RewriteTry {
                 let value = expression.clone();
                 *expression = parse_quote!(#runtime_path::OResult::success(#value));
             }
+            Expr::Macro(macro_expression) if is_diverging_macro(macro_expression) => {}
             Expr::Block(block) => self.rewrite_block_tail(&mut block.block),
             Expr::If(if_expression) => {
                 self.rewrite_block_tail(&mut if_expression.then_branch);
@@ -728,6 +730,13 @@ impl RewriteTry {
             Expr::Unsafe(unsafe_expression) => {
                 self.rewrite_block_tail(&mut unsafe_expression.block);
             }
+            Expr::Loop(loop_expression) if !loop_has_exit(loop_expression) => {}
+            Expr::Break(break_expression) => {
+                if let Some(value) = &mut break_expression.expr {
+                    self.rewrite_result_tail(value);
+                }
+            }
+            Expr::Continue(_) => {}
             Expr::Return(_) => {}
             _ => self.rewrite_result_expression(expression),
         }
@@ -763,6 +772,114 @@ impl RewriteTry {
             *expression = parse_quote!(#runtime_path::OResult::success(#value));
         }
     }
+}
+
+fn loop_has_exit(loop_expression: &ExprLoop) -> bool {
+    let target_label = loop_expression
+        .label
+        .as_ref()
+        .map(|label| label.name.ident.clone());
+    let mut visitor = LoopExitVisitor {
+        target_label,
+        nested_loop_depth: 0,
+        nested_labels: Vec::new(),
+        found: false,
+    };
+    let mut body = loop_expression.body.clone();
+    visitor.visit_block_mut(&mut body);
+    visitor.found
+}
+
+struct LoopExitVisitor {
+    target_label: Option<Ident>,
+    nested_loop_depth: usize,
+    nested_labels: Vec<Ident>,
+    found: bool,
+}
+
+impl VisitMut for LoopExitVisitor {
+    fn visit_expr_break_mut(&mut self, expression: &mut ExprBreak) {
+        let exits_target = match &expression.label {
+            Some(label) => {
+                self.target_label.as_ref() == Some(&label.ident)
+                    && !self.nested_labels.contains(&label.ident)
+            }
+            None => self.nested_loop_depth == 0,
+        };
+        self.found |= exits_target;
+        if let Some(value) = &mut expression.expr {
+            self.visit_expr_mut(value);
+        }
+    }
+
+    fn visit_expr_loop_mut(&mut self, expression: &mut ExprLoop) {
+        self.visit_nested_loop(expression.label.as_ref().map(|label| &label.name.ident));
+        visit_mut::visit_expr_loop_mut(self, expression);
+        self.nested_loop_depth -= 1;
+        if expression.label.is_some() {
+            self.nested_labels.pop();
+        }
+    }
+
+    fn visit_expr_for_loop_mut(&mut self, expression: &mut ExprForLoop) {
+        self.visit_nested_loop(expression.label.as_ref().map(|label| &label.name.ident));
+        visit_mut::visit_expr_for_loop_mut(self, expression);
+        self.nested_loop_depth -= 1;
+        if expression.label.is_some() {
+            self.nested_labels.pop();
+        }
+    }
+
+    fn visit_expr_while_mut(&mut self, expression: &mut ExprWhile) {
+        self.visit_nested_loop(expression.label.as_ref().map(|label| &label.name.ident));
+        visit_mut::visit_expr_while_mut(self, expression);
+        self.nested_loop_depth -= 1;
+        if expression.label.is_some() {
+            self.nested_labels.pop();
+        }
+    }
+
+    fn visit_expr_block_mut(&mut self, expression: &mut ExprBlock) {
+        if let Some(label) = &expression.label {
+            self.nested_labels.push(label.name.ident.clone());
+            visit_mut::visit_expr_block_mut(self, expression);
+            self.nested_labels.pop();
+        } else {
+            visit_mut::visit_expr_block_mut(self, expression);
+        }
+    }
+
+    fn visit_expr_closure_mut(&mut self, _expression: &mut syn::ExprClosure) {}
+
+    fn visit_expr_async_mut(&mut self, _expression: &mut syn::ExprAsync) {}
+
+    fn visit_expr_macro_mut(&mut self, _expression: &mut ExprMacro) {
+        self.found = true;
+    }
+
+    fn visit_stmt_macro_mut(&mut self, _statement: &mut StmtMacro) {
+        self.found = true;
+    }
+
+    fn visit_item_mut(&mut self, _item: &mut syn::Item) {}
+}
+
+impl LoopExitVisitor {
+    fn visit_nested_loop(&mut self, label: Option<&Ident>) {
+        self.nested_loop_depth += 1;
+        if let Some(label) = label {
+            self.nested_labels.push(label.clone());
+        }
+    }
+}
+
+fn is_diverging_macro(expression: &ExprMacro) -> bool {
+    expression.mac.path.segments.last().is_some_and(|segment| {
+        matches!(
+            segment.ident.to_string().as_str(),
+            "panic" | "unreachable" | "todo" | "unimplemented"
+        )
+    })
 }
 
 fn opeo_crate_path() -> syn::Result<Path> {
@@ -874,11 +991,12 @@ fn parse_meta_list(tokens: &proc_macro2::TokenStream) -> syn::Result<Punctuated<
 #[cfg(test)]
 mod tests {
     use super::{
-        Attribute, Meta, OpeoArgs, expand_opeo_with_path, parse_meta_list, result_types,
-        validate_out_bindings, validate_wrapper_name, wrapper_attributes, wrapper_meta,
+        Attribute, Meta, OpeoArgs, RewriteTry, expand_opeo_with_path, is_diverging_macro,
+        loop_has_exit, parse_meta_list, result_types, validate_out_bindings, validate_wrapper_name,
+        wrapper_attributes, wrapper_meta,
     };
     use quote::quote;
-    use syn::parse_quote;
+    use syn::{Expr, ExprLoop, ExprMacro, parse_quote};
 
     fn ok_or_return<T>(result: syn::Result<T>) -> Option<T> {
         assert!(result.is_ok(), "expected successful parser result");
@@ -895,6 +1013,49 @@ mod tests {
             Some(Meta::List(list)) => Some(list),
             _ => None,
         }
+    }
+
+    #[test]
+    fn loop_exit_detection_only_counts_breaks_that_exit_target() {
+        let loop_with_inner_break: ExprLoop = parse_quote!(loop {
+            while true {
+                break;
+            }
+        });
+        let loop_with_exit: ExprLoop = parse_quote!(loop {
+            if should_stop {
+                break Ok::<u32, ParseError>(1);
+            }
+        });
+        let loop_with_macro_exit: ExprLoop = parse_quote!(loop {
+            if should_stop {
+                break_loop_with_result!(Ok::<u32, ParseError>(1));
+            }
+        });
+        let labeled_loop_with_exit: ExprLoop = parse_quote!('outer: loop {
+            loop {
+                break 'outer Ok(1);
+            }
+        });
+
+        assert!(!loop_has_exit(&loop_with_inner_break));
+        assert!(loop_has_exit(&loop_with_exit));
+        assert!(loop_has_exit(&loop_with_macro_exit));
+        assert!(loop_has_exit(&labeled_loop_with_exit));
+    }
+
+    #[test]
+    fn tail_rewriting_recurses_through_parentheses_and_leaves_diverging_macros_alone() {
+        let mut rewrite = RewriteTry::new(parse_quote!(::opeo));
+        let mut parenthesized_tail: Expr = parse_quote!((Ok(7)));
+        rewrite.rewrite_result_tail(&mut parenthesized_tail);
+        let rewritten = quote!(#parenthesized_tail).to_string();
+        assert!(rewritten.contains("OResult :: success (7)"));
+
+        let panic_macro: ExprMacro = parse_quote!(panic!("stop"));
+        let custom_macro: ExprMacro = parse_quote!(custom::never_returns!());
+        assert!(is_diverging_macro(&panic_macro));
+        assert!(!is_diverging_macro(&custom_macro));
     }
 
     #[test]

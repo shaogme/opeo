@@ -228,6 +228,8 @@ assert_eq!(errors.call(|out| parse("12", out)), Ok(12));
 
 此时宏保留 `parse` 作为 OPEO 入口，不会生成默认的 `parse_std`。调用方可通过 `ErrSlot::call` 调用它并取得标准 `Result`。
 
+函数体以没有跳出该循环的 `break` 的 `loop` 收尾时，宏会保留循环的发散控制流；循环中的 `?` 仍会在失败时写入错误槽并提前返回。
+
 如果返回类型是一个类型别名，且其路径最后一段不叫 `Result`，请同时提供成功类型和错误类型，以便宏确定 OPEO 函数签名：
 
 ```rust

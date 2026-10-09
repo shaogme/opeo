@@ -2,6 +2,7 @@ use std::{
     future::Future,
     num::ParseIntError,
     pin::pin,
+    ptr,
     sync::Arc,
     task::{Context, Poll, Wake, Waker},
     thread,
@@ -170,6 +171,12 @@ macro_rules! parse_with_opeo_try {
     };
 }
 
+macro_rules! break_loop_with_result {
+    ($result:expr) => {
+        break $result;
+    };
+}
+
 #[opeo(wrapper = parse_helper_tail_std)]
 fn parse_helper_tail(input: &str) -> Result<u32, ParseError> {
     make_parse_result(input)
@@ -299,6 +306,58 @@ fn parse_with_default_wrapper(input: &str) -> Result<u32, ParseError> {
 #[opeo(wrapper = false)]
 fn parse_without_wrapper(input: &str) -> Result<u32, ParseError> {
     input.parse::<u32>().map_err(ParseError::from)
+}
+
+#[opeo(wrapper = false)]
+fn parse_until_colon(input: &str) -> Result<usize, ParseError> {
+    let mut start = 0;
+    loop {
+        let remaining = input.get(start..).ok_or(ParseError::Missing)?;
+        let character = remaining.chars().next().ok_or(ParseError::Missing)?;
+        if character == ':' {
+            return Ok(start);
+        }
+        start += character.len_utf8();
+    }
+}
+
+#[opeo(wrapper = false)]
+fn parse_if_tail(input: Option<&str>) -> Result<u32, ParseError> {
+    if let Some(input) = input {
+        input.parse::<u32>().map_err(ParseError::from)
+    } else {
+        Err(ParseError::Missing)
+    }
+}
+
+#[opeo(wrapper = false)]
+fn parse_labeled_block_tail(input: &str) -> Result<u32, ParseError> {
+    'parsed: {
+        break 'parsed input.parse::<u32>().map_err(ParseError::from);
+    }
+}
+
+#[opeo(wrapper = false)]
+fn parse_unsafe_tail(value: *const u32) -> Result<u32, ParseError> {
+    unsafe { Ok(value.read()) }
+}
+
+#[opeo(wrapper = false)]
+fn loop_with_break(stop: bool) -> Result<u32, ParseError> {
+    loop {
+        if stop {
+            break Ok::<u32, ParseError>(17);
+        }
+    }
+}
+
+#[opeo(wrapper = false)]
+fn loop_with_macro_break(stop: bool) -> Result<u32, ParseError> {
+    loop {
+        if stop {
+            break_loop_with_result!(Ok::<u32, ParseError>(18));
+        }
+    }
 }
 
 #[opeo(wrapper = sum_pair_std)]
@@ -450,6 +509,43 @@ fn attribute_macro_can_omit_standard_wrappers() {
 
     let counter = Counter { value: 5 };
     assert_eq!(slot.call(|out| counter.add_without_wrapper(7, out)), Ok(12));
+}
+
+#[test]
+fn disabled_wrapper_preserves_diverging_loop_tail_with_question_mark() {
+    let mut slot = ErrSlot::<ParseError>::new();
+    assert_eq!(slot.call(|out| parse_until_colon("text:tail", out)), Ok(4));
+    assert_eq!(
+        slot.call(|out| parse_until_colon("missing delimiter", out)),
+        Err(ParseError::Missing)
+    );
+}
+
+#[test]
+fn attribute_macro_rewrites_nested_and_control_flow_tail_expressions() {
+    let mut slot = ErrSlot::<ParseError>::new();
+    assert_eq!(slot.call(|out| parse_if_tail(Some("42"), out)), Ok(42));
+    assert_eq!(
+        slot.call(|out| parse_if_tail(None, out)),
+        Err(ParseError::Missing)
+    );
+    assert!(matches!(
+        slot.call(|out| parse_if_tail(Some("invalid"), out)),
+        Err(ParseError::Number(_))
+    ));
+    assert_eq!(slot.call(|out| parse_labeled_block_tail("9", out)), Ok(9));
+    assert!(matches!(
+        slot.call(|out| parse_labeled_block_tail("invalid", out)),
+        Err(ParseError::Number(_))
+    ));
+    let unsafe_value = 23;
+    let unsafe_pointer = ptr::addr_of!(unsafe_value);
+    assert_eq!(
+        slot.call(|out| parse_unsafe_tail(unsafe_pointer, out)),
+        Ok(unsafe_value)
+    );
+    assert_eq!(slot.call(|out| loop_with_break(true, out)), Ok(17));
+    assert_eq!(slot.call(|out| loop_with_macro_break(true, out)), Ok(18));
 }
 
 #[test]
