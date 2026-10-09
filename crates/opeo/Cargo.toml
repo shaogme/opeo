@@ -1,0 +1,25 @@
+[package]
+name = "opeo"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Out-parameter error handling with typed failure proofs"
+exclude = ["wip/**"]
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords = ["error-handling", "no-std", "out-parameters"]
+categories = ["no-std", "rust-patterns"]
+
+[dependencies]
+opeo-macros.workspace = true
+
+[dev-dependencies]
+trybuild = "=1.0.116"
+
+[lints]
+workspace = true
+

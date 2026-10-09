@@ -1,0 +1,20 @@
+error[E0521]: borrowed data escapes outside of function
+ --> tests/ui/cross_slot_failure.rs:7:17
+  |
+3 | fn propagate<'slot, 'borrow>(
+  |              ----- lifetime `'slot` defined here
+4 |     result: OResult<'static, u8>,
+  |     ------ `result` declared here, outside of the function body
+5 |     mut out: Out<'slot, 'borrow, ()>,
+  |     ------- `out` is a reference that is only valid in the function body
+6 | ) -> OResult<'slot, u8> {
+7 |     let value = opeo_try!(out, result);
+  |                 ^^^^^^^^^^^^^^^^^^^^^^
+  |                 |
+  |                 `out` escapes the function body here
+  |                 argument requires that `'slot` must outlive `'static`
+  |
+  = note: requirement occurs because of the type `OResult<'_, u8>`, which makes the generic argument `'_` invariant
+  = note: the struct `OResult<'slot, T>` is invariant over the parameter `'slot`
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+  = note: this error originates in the macro `$crate::__opeo_try_value` which comes from the expansion of the macro `opeo_try` (in Nightly builds, run with -Z macro-backtrace for more info)

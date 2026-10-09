@@ -1,0 +1,5 @@
+error: `out` is reserved by #[opeo] in the generated function
+ --> tests/ui/raw_out_binding.rs:5:9
+  |
+5 |     let r#out = 1;
+  |         ^^^^^

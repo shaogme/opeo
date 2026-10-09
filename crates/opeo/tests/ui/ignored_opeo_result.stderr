@@ -1,0 +1,16 @@
+error: unused `OResult` that must be used
+  --> tests/ui/ignored_opeo_result.rs:12:9
+   |
+12 |         fail(out.reborrow());
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: propagate or handle OResult; failures are stored in its error slot
+note: the lint level is defined here
+  --> tests/ui/ignored_opeo_result.rs:1:9
+   |
+ 1 | #![deny(unused_must_use)]
+   |         ^^^^^^^^^^^^^^^
+help: use `let _ = ...` to ignore the resulting value
+   |
+12 |         let _ = fail(out.reborrow());
+   |         +++++++

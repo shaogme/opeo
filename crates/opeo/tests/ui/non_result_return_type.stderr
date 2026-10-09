@@ -1,0 +1,5 @@
+error: `#[opeo]` cannot infer the success and error types from this path; use a return path whose final segment is named `Result`, or specify both `ok = Type` and `error = Type`.
+ --> tests/ui/non_result_return_type.rs:6:17
+  |
+6 | fn invalid() -> NotAResult<u8, ()> {
+  |                 ^^^^^^^^^^^^^^^^^^

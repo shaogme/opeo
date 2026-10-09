@@ -1,0 +1,5 @@
+error: `out` is reserved by #[opeo] in the generated function
+ --> tests/ui/reserved_out_destructured_parameter.rs:4:11
+  |
+4 | fn parse((out, value): (u8, u8)) -> Result<u8, ()> {
+  |           ^^^

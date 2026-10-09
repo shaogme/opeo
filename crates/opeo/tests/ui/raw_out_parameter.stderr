@@ -1,0 +1,5 @@
+error: `out` is reserved by #[opeo] in the generated function
+ --> tests/ui/raw_out_parameter.rs:4:10
+  |
+4 | fn parse(r#out: u32) -> Result<u32, ()> {
+  |          ^^^^^
