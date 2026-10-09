@@ -36,6 +36,26 @@ impl Counter {
         Ok(self.value + amount)
     }
 
+    #[opeo]
+    fn nested_leaf(&self, amount: u32) -> Result<u32, ParseError> {
+        if amount == 0 {
+            return Err(ParseError::Zero);
+        }
+        Ok(self.value + amount)
+    }
+
+    #[opeo]
+    fn nested_through_wrapper(&self, amount: u32) -> Result<u32, ParseError> {
+        let value = self.nested_leaf_std(amount)?;
+        Ok(value + 1)
+    }
+
+    #[opeo]
+    fn nested_through_same_slot(&self, amount: u32) -> Result<u32, ParseError> {
+        let value = opeo_try!(out, self.nested_leaf(amount, out.reborrow()));
+        Ok(value + 1)
+    }
+
     #[opeo(wrapper = false)]
     fn add_without_wrapper(&self, amount: u32) -> Result<u32, ParseError> {
         Ok(self.value + amount)
@@ -367,6 +387,23 @@ fn attribute_macro_supports_struct_instance_methods() {
     assert_eq!(counter.increment_std(0), Err(ParseError::Zero));
     assert_eq!(slot.call(|out| counter.increment(2, out)), Ok(10));
     assert_eq!(counter.consume_std(), Ok(10));
+}
+
+#[test]
+fn opeo_methods_can_call_other_opeo_methods_through_wrapper_or_same_slot() {
+    let counter = Counter { value: 5 };
+    assert_eq!(counter.nested_through_wrapper_std(3), Ok(9));
+    assert_eq!(counter.nested_through_wrapper_std(0), Err(ParseError::Zero));
+
+    let mut slot = ErrSlot::<ParseError>::new();
+    assert_eq!(
+        slot.call(|out| counter.nested_through_same_slot(3, out)),
+        Ok(9)
+    );
+    assert_eq!(
+        slot.call(|out| counter.nested_through_same_slot(0, out)),
+        Err(ParseError::Zero)
+    );
 }
 
 #[test]

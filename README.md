@@ -279,6 +279,61 @@ let mut errors = ErrSlot::<Infallible>::new();
 assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 ```
 
+### Calling another `#[opeo]` method from a transformed method
+
+An `#[opeo]` method name refers to its OPEO entry point, so another transformed method cannot call it as `self.child(...)?`: the entry point takes an additional `Out` argument and returns `OResult`. There are two current options: call the generated standard wrapper, or explicitly pass a shorter borrow of the same error slot. If the child method uses `wrapper = false`, only the same-slot form is available.
+
+```rust
+use opeo::{opeo, opeo_try, ErrSlot};
+
+#[derive(Debug, PartialEq, Eq)]
+enum AddError {
+    Zero,
+}
+
+struct Counter {
+    value: u32,
+}
+
+impl Counter {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, AddError> {
+        if amount == 0 {
+            return Err(AddError::Zero);
+        }
+        Ok(self.value + amount)
+    }
+
+    #[opeo]
+    fn add_then_increment_via_wrapper(&self, amount: u32) -> Result<u32, AddError> {
+        let value = self.add_std(amount)?;
+        Ok(value + 1)
+    }
+
+    #[opeo]
+    fn add_then_increment_in_same_slot(&self, amount: u32) -> Result<u32, AddError> {
+        let value = opeo_try!(out, self.add(amount, out.reborrow()));
+        Ok(value + 1)
+    }
+}
+
+let counter = Counter { value: 5 };
+assert_eq!(counter.add_then_increment_via_wrapper_std(3), Ok(9));
+assert_eq!(counter.add_then_increment_via_wrapper_std(0), Err(AddError::Zero));
+
+let mut errors = ErrSlot::<AddError>::new();
+assert_eq!(
+    errors.call(|out| counter.add_then_increment_in_same_slot(3, out)),
+    Ok(9)
+);
+assert_eq!(
+    errors.call(|out| counter.add_then_increment_in_same_slot(0, out)),
+    Err(AddError::Zero)
+);
+```
+
+`self.add_std(...) ?` first bridges through the child method's own error slot and then propagates the `Result` into the current method's slot. It also supports different error types when `From` provides the conversion. The same-slot form avoids that `Result` bridge, but both methods must use the same error type, and the call must explicitly use `opeo_try!` and `out.reborrow()`.
+
 ## Supported functions and error conversion
 
 `#[opeo]` supports free functions and instance methods in inherent `impl` blocks, including async and const functions and methods. The return type must be a path that resolves to `Result<T, E>` or use explicit `ok` and `error` types. Generated async wrappers return a future, and `ErrSlot::call_async` bridges async OPEO calls back to `Result<T, E>`. Generated wrappers for const functions and methods remain const; the OPEO entry is not const because it writes to runtime error storage. A function or method may have up to six explicit input parameters; the macro adds the `Out` parameter to the OPEO form. `extern` and variadic functions are rejected.

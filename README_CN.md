@@ -279,6 +279,61 @@ let mut errors = ErrSlot::<Infallible>::new();
 assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
 ```
 
+### 在被改写的方法中调用其他 `#[opeo]` 方法
+
+`#[opeo]` 方法名对应 OPEO 入口，因此不能在另一个被改写的方法中直接写 `self.child(...)?`：入口需要额外的 `Out` 参数，并返回 `OResult`。目前有两种写法：通过生成的标准包装方法调用，或显式传递同一个错误槽的短期借用。如果子方法设置了 `wrapper = false`，只能使用同槽位写法。
+
+```rust
+use opeo::{opeo, opeo_try, ErrSlot};
+
+#[derive(Debug, PartialEq, Eq)]
+enum AddError {
+    Zero,
+}
+
+struct Counter {
+    value: u32,
+}
+
+impl Counter {
+    #[opeo]
+    fn add(&self, amount: u32) -> Result<u32, AddError> {
+        if amount == 0 {
+            return Err(AddError::Zero);
+        }
+        Ok(self.value + amount)
+    }
+
+    #[opeo]
+    fn add_then_increment_via_wrapper(&self, amount: u32) -> Result<u32, AddError> {
+        let value = self.add_std(amount)?;
+        Ok(value + 1)
+    }
+
+    #[opeo]
+    fn add_then_increment_in_same_slot(&self, amount: u32) -> Result<u32, AddError> {
+        let value = opeo_try!(out, self.add(amount, out.reborrow()));
+        Ok(value + 1)
+    }
+}
+
+let counter = Counter { value: 5 };
+assert_eq!(counter.add_then_increment_via_wrapper_std(3), Ok(9));
+assert_eq!(counter.add_then_increment_via_wrapper_std(0), Err(AddError::Zero));
+
+let mut errors = ErrSlot::<AddError>::new();
+assert_eq!(
+    errors.call(|out| counter.add_then_increment_in_same_slot(3, out)),
+    Ok(9)
+);
+assert_eq!(
+    errors.call(|out| counter.add_then_increment_in_same_slot(0, out)),
+    Err(AddError::Zero)
+);
+```
+
+`self.add_std(...) ?` 会先通过子方法自己的错误槽桥接成 `Result`，再传播到当前方法的错误槽；它也适用于错误类型可通过 `From` 转换的情况。同槽位写法不需要这层 `Result` 桥接，但父子方法必须使用相同的错误类型，并且需要显式调用 `opeo_try!` 和 `out.reborrow()`。
+
 ## 支持范围与错误转换
 
 `#[opeo]` 支持自由函数和固有 `impl` 块中的实例方法，包括异步和 `const` 函数及方法。返回类型必须是可解析为 `Result<T, E>` 的路径，或通过 `ok` 和 `error` 显式指定类型。生成异步包装器时，它会返回一个 Future；`ErrSlot::call_async` 可将异步 OPEO 调用桥接回 `Result<T, E>`。生成 `const` 函数或方法的包装器时，会保留其 `const`；OPEO 入口会失去 `const`，因为它需要写入运行时错误槽。函数或方法最多有六个显式输入参数；宏会为 OPEO 形式添加 `Out` 参数。`extern` 和可变参数函数不受支持。
