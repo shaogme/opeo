@@ -2,7 +2,7 @@
 
 use opeo::{ErrSlot, OResult, Out};
 
-fn fail<'slot, 'borrow>(out: Out<'slot, 'borrow, ()>) -> OResult<'slot, ()> {
+fn fail<'slot>(out: Out<'slot, '_, ()>) -> OResult<'slot, ()> {
     Err(out.fail(()))
 }
 

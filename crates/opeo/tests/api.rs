@@ -1,5 +1,6 @@
 use core::num::ParseIntError;
 use std::{
+    cell::Cell,
     future::Future,
     pin::pin,
     sync::Arc,
@@ -7,7 +8,7 @@ use std::{
     thread,
 };
 
-use opeo::{ErrSlot, OResult, Out, ResultOutExt, bail, ensure, opeo_try};
+use opeo::{ErrSlot, OResult, Out, ResultOutExt, bail, ensure};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ParseError {
@@ -33,15 +34,12 @@ impl From<ParseIntError> for ParseError {
     }
 }
 
-fn parse_number<'slot, 'borrow>(
-    input: &str,
-    mut out: Out<'slot, 'borrow, ParseError>,
-) -> OResult<'slot, u32> {
+fn parse_number<'slot>(input: &str, mut out: Out<'slot, '_, ParseError>) -> OResult<'slot, u32> {
     if input.is_empty() {
         bail!(out, ParseError::Empty);
     }
 
-    let value = input.parse::<u32>().or_out_into(out.reborrow())?;
+    let value = input.parse::<u32>().store_err_into(out.reborrow())?;
     ensure!(out, value > 0, ParseError::Zero);
     Ok(value)
 }
@@ -51,36 +49,25 @@ fn parse_number_std(input: &str) -> Result<u32, ParseError> {
     slot.call(|out| parse_number(input, out))
 }
 
-fn parse_optional<'slot, 'borrow>(
+fn parse_optional<'slot>(
     input: Option<u32>,
-    mut out: Out<'slot, 'borrow, ParseError>,
+    mut out: Out<'slot, '_, ParseError>,
 ) -> OResult<'slot, u32> {
-    let value = opeo_try!(out, input, ParseError::Missing);
+    let value = input.ok_or(ParseError::Missing).store_err(out.reborrow())?;
     ensure!(out, value > 0, ParseError::Zero);
     Ok(value)
 }
 
-fn parse_nested<'slot, 'borrow>(mut out: Out<'slot, 'borrow, ParseError>) -> OResult<'slot, u8> {
+fn parse_nested<'slot>(mut out: Out<'slot, '_, ParseError>) -> OResult<'slot, u8> {
     let value = nested_leaf(out.reborrow())?;
     Ok(value)
 }
 
-fn nested_leaf<'slot, 'borrow>(out: Out<'slot, 'borrow, ParseError>) -> OResult<'slot, u8> {
+fn nested_leaf<'slot>(out: Out<'slot, '_, ParseError>) -> OResult<'slot, u8> {
     Err(out.fail(ParseError::Missing))
 }
 
-fn parse_with_try_macro<'slot, 'borrow>(
-    input: &str,
-    mut out: Out<'slot, 'borrow, ParseError>,
-) -> OResult<'slot, u32> {
-    let value = opeo_try!(out, input.parse::<u32>().map_err(ParseError::from));
-    Ok(value)
-}
-
-fn parse_source_error<'slot, 'borrow, E>(
-    value: u32,
-    out: Out<'slot, 'borrow, E>,
-) -> OResult<'slot, u32>
+fn parse_source_error<'slot, E>(value: u32, out: Out<'slot, '_, E>) -> OResult<'slot, u32>
 where
     E: From<SourceError>,
 {
@@ -89,7 +76,7 @@ where
     } else {
         Ok(value)
     };
-    result.or_out_into(out)
+    result.store_err_into(out)
 }
 
 struct Counter {
@@ -97,21 +84,17 @@ struct Counter {
 }
 
 impl Counter {
-    fn add<'slot, 'borrow>(
-        &self,
-        amount: u32,
-        out: Out<'slot, 'borrow, ParseError>,
-    ) -> OResult<'slot, u32> {
+    fn add<'slot>(&self, amount: u32, out: Out<'slot, '_, ParseError>) -> OResult<'slot, u32> {
         if amount == 0 {
             return Err(out.fail(ParseError::Zero));
         }
         Ok(self.value + amount)
     }
 
-    fn add_nested<'slot, 'borrow>(
+    fn add_nested<'slot>(
         &self,
         amount: u32,
-        mut out: Out<'slot, 'borrow, ParseError>,
+        mut out: Out<'slot, '_, ParseError>,
     ) -> OResult<'slot, u32> {
         let value = self.add(amount, out.reborrow())?;
         Ok(value + 1)
@@ -119,21 +102,17 @@ impl Counter {
 }
 
 trait TraitCounter {
-    fn add<'slot, 'borrow>(
-        &self,
-        amount: u32,
-        _out: Out<'slot, 'borrow, ParseError>,
-    ) -> OResult<'slot, u32> {
+    fn add<'slot>(&self, amount: u32, _out: Out<'slot, '_, ParseError>) -> OResult<'slot, u32> {
         Ok(amount + 1)
     }
 
-    fn base<'slot, 'borrow>(&self, out: Out<'slot, 'borrow, ParseError>) -> OResult<'slot, u32>;
+    fn base<'slot>(&self, out: Out<'slot, '_, ParseError>) -> OResult<'slot, u32>;
 }
 
 struct SimpleCounter(u32);
 
 impl TraitCounter for SimpleCounter {
-    fn base<'slot, 'borrow>(&self, _out: Out<'slot, 'borrow, ParseError>) -> OResult<'slot, u32> {
+    fn base<'slot>(&self, _out: Out<'slot, '_, ParseError>) -> OResult<'slot, u32> {
         Ok(self.0)
     }
 }
@@ -142,11 +121,11 @@ async fn parse_async(input: &str) -> Result<u32, ParseIntError> {
     input.parse()
 }
 
-async fn parse_async_opeo<'slot, 'borrow>(
+async fn parse_async_opeo<'slot>(
     input: &str,
-    mut out: Out<'slot, 'borrow, ParseError>,
+    mut out: Out<'slot, '_, ParseError>,
 ) -> OResult<'slot, u32> {
-    let value = parse_async(input).await.or_out_into(out.reborrow())?;
+    let value = parse_async(input).await.store_err_into(out.reborrow())?;
     Ok(value)
 }
 
@@ -188,19 +167,22 @@ fn result_conversion_and_control_flow_write_the_error_slot() {
 #[test]
 fn result_out_ext_supports_same_custom_and_from_conversions() {
     let mut slot = ErrSlot::<ParseError>::new();
-    assert_eq!(slot.call(|out| Ok::<_, ParseError>(4).or_out(out)), Ok(4));
     assert_eq!(
-        slot.call(|out| Err::<(), _>(ParseError::Missing).or_out(out)),
+        slot.call(|out| Ok::<_, ParseError>(4).store_err(out)),
+        Ok(4)
+    );
+    assert_eq!(
+        slot.call(|out| Err::<(), _>(ParseError::Missing).store_err(out)),
         Err(ParseError::Missing)
     );
     assert_eq!(
         slot.call(|out| {
-            Err::<(), _>("invalid".to_owned()).or_out_with(out, |_| ParseError::InvalidNumber)
+            Err::<(), _>("invalid".to_owned()).store_err_with(out, |_| ParseError::InvalidNumber)
         }),
         Err(ParseError::InvalidNumber)
     );
     assert_eq!(
-        slot.call(|out| Err::<(), _>(SourceError).or_out_into(out)),
+        slot.call(|out| Err::<(), _>(SourceError).store_err_into(out)),
         Err(ParseError::Source)
     );
 }
@@ -208,7 +190,13 @@ fn result_out_ext_supports_same_custom_and_from_conversions() {
 #[test]
 fn native_question_mark_propagates_same_slot_results() {
     let mut slot = ErrSlot::<ParseError>::new();
-    assert_eq!(slot.call(|out| parse_optional(Some(12), out)), Ok(12));
+    assert_eq!(slot.call(parse_nested), Err(ParseError::Missing));
+}
+
+#[test]
+fn option_errors_use_the_standard_result_conversion() {
+    let mut slot = ErrSlot::<ParseError>::new();
+    assert_eq!(slot.call(|out| parse_optional(Some(3), out)), Ok(3));
     assert_eq!(
         slot.call(|out| parse_optional(None, out)),
         Err(ParseError::Missing)
@@ -217,18 +205,66 @@ fn native_question_mark_propagates_same_slot_results() {
         slot.call(|out| parse_optional(Some(0), out)),
         Err(ParseError::Zero)
     );
-    assert_eq!(slot.call(parse_nested), Err(ParseError::Missing));
 }
 
 #[test]
-fn opeo_try_bridges_standard_result_and_option_values() {
+fn ensure_evaluates_its_condition_once_and_error_only_on_failure() {
     let mut slot = ErrSlot::<ParseError>::new();
-    assert_eq!(slot.call(|out| parse_with_try_macro("32", out)), Ok(32));
-    assert_eq!(
-        slot.call(|out| parse_with_try_macro("bad", out)),
-        Err(ParseError::InvalidNumber)
-    );
-    assert_eq!(slot.call(|out| parse_optional(Some(3), out)), Ok(3));
+    let condition_evaluations = Cell::new(0);
+    let error_evaluations = Cell::new(0);
+
+    let success = slot.call(|mut out| {
+        ensure!(
+            out,
+            {
+                condition_evaluations.set(condition_evaluations.get() + 1);
+                true
+            },
+            {
+                error_evaluations.set(error_evaluations.get() + 1);
+                ParseError::Zero
+            }
+        );
+        Ok(7)
+    });
+
+    assert_eq!(success, Ok(7));
+    assert_eq!(condition_evaluations.get(), 1);
+    assert_eq!(error_evaluations.get(), 0);
+
+    let failure = slot.call(|mut out| {
+        ensure!(
+            out,
+            {
+                condition_evaluations.set(condition_evaluations.get() + 1);
+                false
+            },
+            {
+                error_evaluations.set(error_evaluations.get() + 1);
+                ParseError::Zero
+            }
+        );
+        Ok(7)
+    });
+
+    assert_eq!(failure, Err(ParseError::Zero));
+    assert_eq!(condition_evaluations.get(), 2);
+    assert_eq!(error_evaluations.get(), 1);
+}
+
+#[test]
+fn bail_evaluates_its_error_once() {
+    let mut slot = ErrSlot::<ParseError>::new();
+    let error_evaluations = Cell::new(0);
+    let failure: Result<(), ParseError> = slot.call(|mut out| {
+        bail!(out, {
+            error_evaluations.set(error_evaluations.get() + 1);
+            ParseError::Empty
+        });
+    });
+
+    assert_eq!(failure, Err(ParseError::Empty));
+    assert_eq!(error_evaluations.get(), 1);
 }
 
 #[test]

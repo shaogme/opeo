@@ -1,6 +1,5 @@
 use std::{
-    mem::{forget, size_of},
-    num::NonZeroUsize,
+    mem::forget,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{
         Arc,
@@ -8,7 +7,7 @@ use std::{
     },
 };
 
-use opeo::{ErrSlot, Failed, OResult, Out, ResultOutExt};
+use opeo::{ErrSlot, OResult};
 
 fn trigger_test_unwind() -> ! {
     resume_unwind(Box::new("intentional callback unwind"))
@@ -17,25 +16,6 @@ fn trigger_test_unwind() -> ! {
 #[derive(Debug, PartialEq, Eq)]
 enum TestError {
     Basic(u8),
-    Converted(String),
-}
-
-#[test]
-fn failed_token_is_zero_sized_and_result_uses_pointer_niche() {
-    assert_eq!(size_of::<Failed<'static>>(), 0);
-    assert_same_layout::<()>();
-    assert_same_layout::<u8>();
-    assert_same_layout::<NonZeroUsize>();
-    assert_same_layout::<Option<NonZeroUsize>>();
-    assert_same_layout::<[u8; 32]>();
-    assert_eq!(
-        size_of::<Out<'static, 'static, u32>>(),
-        size_of::<*mut u32>()
-    );
-}
-
-fn assert_same_layout<T>() {
-    assert_eq!(size_of::<OResult<'static, T>>(), size_of::<Result<T, ()>>());
 }
 
 #[test]
@@ -187,49 +167,7 @@ fn panic_before_fail_leaves_slot_usable() {
 }
 
 #[test]
-fn standard_result_bridge_supports_same_and_converted_errors() {
-    let mut slot = ErrSlot::<TestError>::new();
-    assert_eq!(slot.call(|out| Ok::<_, TestError>(4).or_out(out)), Ok(4));
-    let same = slot.call(|out| Err::<(), _>(TestError::Basic(3)).or_out(out));
-    assert_eq!(same, Err(TestError::Basic(3)));
-
-    let converted =
-        slot.call(|out| Err::<(), _>("invalid".to_owned()).or_out_with(out, TestError::Converted));
-    assert_eq!(converted, Err(TestError::Converted("invalid".to_owned())));
-}
-
-#[test]
-fn standard_result_bridge_supports_from_conversion() {
-    #[derive(Debug, PartialEq, Eq)]
-    struct OuterError(TestError);
-
-    impl From<TestError> for OuterError {
-        fn from(error: TestError) -> Self {
-            Self(error)
-        }
-    }
-
-    let mut slot = ErrSlot::<OuterError>::new();
-    let result = slot.call(|out| Err::<(), _>(TestError::Basic(5)).or_out_into(out));
-    assert_eq!(result, Err(OuterError(TestError::Basic(5))));
-}
-
-#[test]
-fn successful_return_drops_an_unreported_error() {
-    let drops = Arc::new(AtomicUsize::new(0));
-    let mut slot = ErrSlot::<DropCounter>::new();
-    let result = slot.call(|out| {
-        let _failure = out.fail(DropCounter(Arc::clone(&drops)));
-        Ok(71)
-    });
-
-    assert!(matches!(result, Ok(71)));
-    assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(matches!(slot.call(|_| Ok(72)), Ok(72)));
-}
-
-#[test]
-fn success_after_a_write_cleans_the_slot_without_panicking() {
+fn successful_return_drops_written_error_and_cleans_slot() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
     let result = slot.call(|out| {
