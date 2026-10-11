@@ -127,15 +127,24 @@ impl RewriteTry {
 
     fn rewrite_result_expression(&self, expression: &mut Expr) {
         let runtime_path = &self.runtime_path;
-        let source_result_type = &self.source_result_type;
+        if expression_needs_result_type_hint(expression) {
+            let source_result_type = &self.source_result_type;
+            let result = expression.clone();
+            *expression = parse_quote!({
+                let __opeo_result: #source_result_type = #result;
+                #runtime_path::__OpeoTry::__opeo_try(
+                    __opeo_result,
+                    out.reborrow(),
+                )
+            });
+            return;
+        }
+
         let result = expression.clone();
-        *expression = parse_quote!({
-            let __opeo_result: #source_result_type = #result;
-            #runtime_path::__OpeoTry::__opeo_try(
-                __opeo_result,
-                out.reborrow(),
-            )
-        });
+        *expression = parse_quote!(#runtime_path::__OpeoTry::__opeo_try(
+            #result,
+            out.reborrow(),
+        ));
     }
 
     fn rewrite_result_call(&mut self, expression: &mut Expr) {
@@ -158,6 +167,25 @@ impl RewriteTry {
         } else {
             *expression = parse_quote!(#runtime_path::OResult::success(#value));
         }
+    }
+}
+
+fn expression_needs_result_type_hint(expression: &Expr) -> bool {
+    match expression {
+        Expr::Loop(_) | Expr::Macro(_) => true,
+        Expr::MethodCall(method_call) => is_result_constructor(&method_call.receiver),
+        _ => false,
+    }
+}
+
+fn is_result_constructor(expression: &Expr) -> bool {
+    match expression {
+        Expr::Call(call) => {
+            is_result_variant_call(call, "Ok") || is_result_variant_call(call, "Err")
+        }
+        Expr::Paren(paren) => is_result_constructor(&paren.expr),
+        Expr::Group(group) => is_result_constructor(&group.expr),
+        _ => false,
     }
 }
 

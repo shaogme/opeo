@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     future::Future,
     num::ParseIntError,
     pin::pin,
@@ -9,7 +10,8 @@ use std::{
 };
 
 use opeo::{
-    ErrSlot, OResult, Out, bail, bail as abort, ensure, opeo, opeo_try, opeo_try as try_opeo,
+    ErrSlot, OResult, Out, bail, bail as abort, ensure, opeo, opeo as opeo_macro, opeo_try,
+    opeo_try as try_opeo,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -303,6 +305,15 @@ fn parse_with_default_wrapper(input: &str) -> Result<u32, ParseError> {
     Ok(input.len() as u32)
 }
 
+#[opeo_macro(wrapper = parse_with_renamed_import_std)]
+fn parse_with_renamed_import(input: u8) -> Result<u8, ParseError> {
+    if input == 0 {
+        Err(ParseError::Zero)
+    } else {
+        Ok(input)
+    }
+}
+
 #[opeo(wrapper = false)]
 fn parse_without_wrapper(input: &str) -> Result<u32, ParseError> {
     input.parse::<u32>().map_err(ParseError::from)
@@ -448,6 +459,69 @@ impl GenericService {
             Ok(value) => OResult::success(value + 1),
             Err(error) => OResult::failed(out.fail(error.into())),
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BudgetError;
+
+#[derive(Debug, PartialEq, Eq)]
+struct BudgetFailureA(BudgetError);
+
+impl From<BudgetError> for BudgetFailureA {
+    fn from(error: BudgetError) -> Self {
+        Self(error)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BudgetFailureB(BudgetError);
+
+impl From<BudgetError> for BudgetFailureB {
+    fn from(error: BudgetError) -> Self {
+        Self(error)
+    }
+}
+
+struct BudgetLimits {
+    max_steps: usize,
+}
+
+struct BudgetState {
+    steps: Cell<usize>,
+    limits: BudgetLimits,
+}
+
+struct BudgetService {
+    state: BudgetState,
+}
+
+impl BudgetService {
+    fn state(&self) -> &BudgetState {
+        &self.state
+    }
+
+    fn increase(
+        &self,
+        current: &Cell<usize>,
+        steps: usize,
+        limit: usize,
+    ) -> Result<(), BudgetError> {
+        let next = current.get().checked_add(steps).ok_or(BudgetError)?;
+        if next > limit {
+            return Err(BudgetError);
+        }
+        current.set(next);
+        Ok(())
+    }
+
+    #[opeo(wrapper = false)]
+    pub fn consume<E>(&self, steps: usize) -> Result<(), E>
+    where
+        E: From<BudgetError>,
+    {
+        self.increase(&self.state().steps, steps, self.state().limits.max_steps)
+            .map(|_| ())
     }
 }
 
@@ -699,6 +773,19 @@ fn attribute_macro_generates_default_wrapper_names() {
 }
 
 #[test]
+fn attribute_macro_supports_renamed_macro_imports() {
+    let mut slot = ErrSlot::<ParseError>::new();
+
+    assert_eq!(parse_with_renamed_import_std(7), Ok(7));
+    assert_eq!(slot.call(|out| parse_with_renamed_import(8, out)), Ok(8));
+    assert_eq!(parse_with_renamed_import_std(0), Err(ParseError::Zero));
+    assert_eq!(
+        slot.call(|out| parse_with_renamed_import(0, out)),
+        Err(ParseError::Zero)
+    );
+}
+
+#[test]
 fn attribute_macro_forwards_destructured_parameters() {
     assert_eq!(sum_pair_std((7, 8)), Ok(15));
 
@@ -794,6 +881,30 @@ fn generic_methods_accept_different_out_error_types() {
     assert_eq!(
         manual_errors_b.call(|out| service.process_without_macro(0, out)),
         Err(GenericErrorB(SourceError))
+    );
+}
+
+#[test]
+fn generic_methods_convert_tail_results_into_the_out_error_type() {
+    let service = BudgetService {
+        state: BudgetState {
+            steps: Cell::new(0),
+            limits: BudgetLimits { max_steps: 4 },
+        },
+    };
+
+    let mut errors_a = ErrSlot::<BudgetFailureA>::new();
+    assert_eq!(errors_a.call(|out| service.consume(3, out)), Ok(()));
+    assert_eq!(
+        errors_a.call(|out| service.consume(2, out)),
+        Err(BudgetFailureA(BudgetError))
+    );
+
+    let mut errors_b = ErrSlot::<BudgetFailureB>::new();
+    assert_eq!(errors_b.call(|out| service.consume(1, out)), Ok(()));
+    assert_eq!(
+        errors_b.call(|out| service.consume(4, out)),
+        Err(BudgetFailureB(BudgetError))
     );
 }
 
