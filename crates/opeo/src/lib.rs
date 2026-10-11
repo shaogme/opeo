@@ -6,10 +6,6 @@ extern crate self as opeo;
 
 use core::{fmt, hint::unreachable_unchecked, marker::PhantomData, ops::AsyncFnOnce, ptr::NonNull};
 
-/// Converts a `Result` function into an OPEO entry and optionally generates a wrapper.
-/// 将 `Result` 函数转换为 OPEO 入口，并可选择生成包装函数。
-pub use opeo_macros::opeo;
-
 #[must_use]
 /// Proves that this call wrote an error to its slot.
 /// 表示本次调用已向错误槽写入错误。
@@ -21,98 +17,9 @@ impl fmt::Debug for Failed<'_> {
     }
 }
 
-/// A branded result whose error is stored in its `Out` slot.
-/// 携带槽位品牌的结果，错误值保存在对应的 `Out` 槽中。
-#[must_use = "propagate or handle OResult; failures are stored in its error slot"]
-#[repr(transparent)]
-pub struct OResult<'slot, T> {
-    value: Result<T, ()>,
-    slot: PhantomData<fn(&'slot ()) -> &'slot ()>,
-}
-
-impl<'slot, T> OResult<'slot, T> {
-    /// Creates a successful result.
-    /// 创建成功结果。
-    pub const fn success(value: T) -> Self {
-        Self {
-            value: Ok(value),
-            slot: PhantomData,
-        }
-    }
-
-    /// Returns `true` when this result contains a success value.
-    /// 当结果包含成功值时返回 `true`。
-    pub const fn is_ok(&self) -> bool {
-        self.value.is_ok()
-    }
-
-    /// Returns `true` when this result represents a failure.
-    /// 当结果表示失败时返回 `true`。
-    pub const fn is_err(&self) -> bool {
-        self.value.is_err()
-    }
-
-    /// Maps a success value while preserving a failure for this slot.
-    /// 转换成功值，同时保留绑定到当前槽位的失败状态。
-    pub fn map<U>(self, map: impl FnOnce(T) -> U) -> OResult<'slot, U> {
-        match self.value {
-            Ok(value) => OResult::success(map(value)),
-            Err(()) => OResult {
-                value: Err(()),
-                slot: PhantomData,
-            },
-        }
-    }
-
-    /// Chains a success value into another result for the same slot.
-    /// 将成功值继续传入绑定到同一槽位的结果计算。
-    pub fn and_then<U>(self, next: impl FnOnce(T) -> OResult<'slot, U>) -> OResult<'slot, U> {
-        match self.value {
-            Ok(value) => next(value),
-            Err(()) => OResult {
-                value: Err(()),
-                slot: PhantomData,
-            },
-        }
-    }
-
-    /// Creates a failure result from a real failure proof.
-    /// 根据真实失败凭证创建失败结果。
-    pub const fn failed(_failure: Failed<'slot>) -> Self {
-        Self {
-            value: Err(()),
-            slot: PhantomData,
-        }
-    }
-
-    /// Exposes the branded state to generated propagation code.
-    /// 暴露品牌化的内部状态供生成代码传播。
-    pub fn into_result(self) -> Result<T, Failed<'slot>> {
-        match self.value {
-            Ok(value) => Ok(value),
-            Err(()) => Err(Failed(PhantomData)),
-        }
-    }
-}
-
-/// Exposes standard `Result` type information to `#[opeo]`.
-/// 为 `#[opeo]` 暴露标准 `Result` 的类型信息。
-#[doc(hidden)]
-pub trait __OpeoResultParts {
-    /// The success type of the standard `Result`.
-    /// 标准 `Result` 的成功类型。
-    type Success;
-
-    /// The error type of the standard `Result`.
-    /// 标准 `Result` 的错误类型。
-    type Error;
-}
-
-impl<T, E> __OpeoResultParts for Result<T, E> {
-    type Success = T;
-
-    type Error = E;
-}
+/// A result whose error proof is branded for the slot that stores its error.
+/// 错误凭证绑定到实际存储错误的槽位的结果类型别名。
+pub type OResult<'slot, T> = Result<T, Failed<'slot>>;
 
 struct ErrState<E> {
     value: Option<E>,
@@ -248,7 +155,7 @@ impl<E> ErrSlot<E> {
         let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
         let result = f(out);
 
-        match result.into_result() {
+        match result {
             Ok(value) => {
                 guard.drop_error();
                 guard.disarm();
@@ -279,7 +186,7 @@ impl<E> ErrSlot<E> {
         let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
         let result = f(out).await;
 
-        match result.into_result() {
+        match result {
             Ok(value) => {
                 guard.drop_error();
                 guard.disarm();
@@ -322,7 +229,7 @@ impl<E> ErrSlot<E> {
         let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
         let result = f(out).await;
 
-        match result.into_result() {
+        match result {
             Ok(value) => {
                 guard.drop_error();
                 guard.disarm();
@@ -486,8 +393,8 @@ impl<T, E> ResultOutExt<T, E> for Result<T, E> {
         convert: impl FnOnce(E) -> E2,
     ) -> OResult<'slot, T> {
         match self {
-            Ok(value) => OResult::success(value),
-            Err(error) => OResult::failed(out.fail(convert(error))),
+            Ok(value) => Ok(value),
+            Err(error) => Err(out.fail(convert(error))),
         }
     }
 
@@ -499,39 +406,12 @@ impl<T, E> ResultOutExt<T, E> for Result<T, E> {
     }
 }
 
-/// Bridges standard and same-slot OPEO results.
-/// 将标准 `Result` 或同槽位 `OResult` 转换为带品牌的结果。
-#[doc(hidden)]
-pub trait __OpeoTry<'slot, T, E> {
-    /// Stores an error or propagates a same-slot failure proof.
-    /// 将错误写入槽位，或直接传递已有的同槽位失败凭证。
-    fn __opeo_try<'borrow>(self, out: Out<'slot, 'borrow, E>) -> OResult<'slot, T>;
-}
-
-impl<'slot, T, Source, Target> __OpeoTry<'slot, T, Target> for Result<T, Source>
-where
-    Target: From<Source>,
-{
-    fn __opeo_try<'borrow>(self, out: Out<'slot, 'borrow, Target>) -> OResult<'slot, T> {
-        match self {
-            Ok(value) => OResult::success(value),
-            Err(error) => OResult::failed(out.fail(Target::from(error))),
-        }
-    }
-}
-
-impl<'slot, T, E> __OpeoTry<'slot, T, E> for OResult<'slot, T> {
-    fn __opeo_try<'borrow>(self, _out: Out<'slot, 'borrow, E>) -> OResult<'slot, T> {
-        self
-    }
-}
-
 /// Stores an error in `Out` and returns early with failure.
 /// 将错误写入 `Out` 并提前返回失败。
 #[macro_export]
 macro_rules! bail {
     ($out:expr, $error:expr $(,)?) => {
-        return $crate::OResult::failed(($out).reborrow().fail($error));
+        return ::core::result::Result::Err(($out).reborrow().fail($error));
     };
 }
 
@@ -541,44 +421,28 @@ macro_rules! bail {
 macro_rules! ensure {
     ($out:expr, $condition:expr, $error:expr $(,)?) => {
         if !$condition {
-            return $crate::OResult::failed(($out).reborrow().fail($error));
+            return ::core::result::Result::Err(($out).reborrow().fail($error));
         }
     };
 }
 
-/// Bridges a `Result` or `Option` failure into the current OPEO error slot. For a `Result`,
-/// the slot error type may differ from the source error when it implements `From<SourceError>`.
-/// 将 `Result` 或 `Option` 失败桥接到当前 OPEO 错误槽。对于 `Result`，只要槽位错误类型实现
-/// `From<SourceError>`，它就可以不同于源错误类型。
-#[macro_export]
-macro_rules! __opeo_try_value {
-    ($out:expr, $result:expr $(,)?) => {
-        match $crate::OResult::into_result($crate::__OpeoTry::__opeo_try(
-            ($result),
-            ($out).reborrow(),
-        )) {
-            ::core::result::Result::Ok(value) => value,
-            ::core::result::Result::Err(failure) => {
-                return $crate::OResult::failed(failure);
-            }
-        }
-    };
-}
-
-/// Bridges a `Result` or `Option` failure into the current OPEO error slot. For a `Result`,
-/// the slot error type may differ from the source error when it implements `From<SourceError>`.
-/// 将 `Result` 或 `Option` 失败桥接到当前 OPEO 错误槽。对于 `Result`，只要槽位错误类型实现
-/// `From<SourceError>`，它就可以不同于源错误类型。
+/// Bridges a standard `Result` or an explicitly mapped `Option` failure into the current slot.
+/// 将标准 `Result` 或显式映射的 `Option` 失败桥接到当前错误槽。
 #[macro_export]
 macro_rules! opeo_try {
     ($out:expr, $result:expr $(,)?) => {
-        $crate::__opeo_try_value!($out, $result)
+        match $crate::ResultOutExt::or_out_into(($result), ($out).reborrow()) {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(failure) => {
+                return ::core::result::Result::Err(failure);
+            }
+        }
     };
     ($out:expr, $option:expr, $error:expr $(,)?) => {
         match $option {
             Some(value) => value,
             None => {
-                return $crate::OResult::failed(($out).reborrow().fail($error));
+                return ::core::result::Result::Err(($out).reborrow().fail($error));
             }
         }
     };

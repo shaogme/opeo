@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/opeo", "crates/opeo-macros"]
+members = ["crates/opeo"]
 resolver = "2"
 
 [workspace.package]
@@ -12,9 +12,6 @@ repository = "https://github.com/shaogme/opeo"
 homepage = "https://github.com/shaogme/opeo"
 documentation = "https://docs.rs/opeo"
 keywords = ["error-handling", "out-parameters"]
-
-[workspace.dependencies]
-opeo-macros = { path = "crates/opeo-macros", version = "0.1.6" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

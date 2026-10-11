@@ -42,15 +42,15 @@ fn assert_same_layout<T>() {
 fn call_returns_success_without_touching_the_slot() {
     let mut slot = ErrSlot::<TestError>::new();
 
-    assert_eq!(slot.call(|_| OResult::success(17)), Ok(17));
-    assert_eq!(slot.call(|_| OResult::success(23)), Ok(23));
+    assert_eq!(slot.call(|_| Ok(17)), Ok(17));
+    assert_eq!(slot.call(|_| Ok(23)), Ok(23));
 }
 
 #[test]
 fn call_catches_the_written_error() {
     let mut slot = ErrSlot::<TestError>::new();
 
-    let result = slot.call(|out| OResult::<()>::failed(out.fail(TestError::Basic(7))));
+    let result = slot.call(|out| Err::<(), _>(out.fail(TestError::Basic(7))));
 
     assert_eq!(result, Err(TestError::Basic(7)));
 }
@@ -58,7 +58,7 @@ fn call_catches_the_written_error() {
 #[test]
 fn caught_can_be_inspected_then_taken_once() {
     let mut slot = ErrSlot::<TestError>::new();
-    let result = slot.try_call(|out| OResult::<()>::failed(out.fail(TestError::Basic(9))));
+    let result = slot.try_call(|out| Err::<(), _>(out.fail(TestError::Basic(9))));
     assert!(result.is_err());
     let Some(caught) = result.err() else {
         return;
@@ -66,13 +66,13 @@ fn caught_can_be_inspected_then_taken_once() {
 
     assert_eq!(caught.get(), &TestError::Basic(9));
     assert_eq!(caught.take(), TestError::Basic(9));
-    assert_eq!(slot.call(|_| OResult::success(31)), Ok(31));
+    assert_eq!(slot.call(|_| Ok(31)), Ok(31));
 }
 
 #[test]
 fn failure_types_support_debug_and_unwrap() {
     let mut slot = ErrSlot::<TestError>::new();
-    let result = slot.try_call(|_| OResult::success(19));
+    let result = slot.try_call(|_| Ok(19));
     assert!(result.is_ok());
     let Some(value) = result.ok() else {
         return;
@@ -83,7 +83,7 @@ fn failure_types_support_debug_and_unwrap() {
     let result = slot.try_call(|out| {
         let failure = out.fail(TestError::Basic(13));
         assert_eq!(format!("{failure:?}"), "Failed");
-        OResult::<()>::failed(failure)
+        Err::<(), _>(failure)
     });
     assert!(result.is_err());
     let Some(caught) = result.err() else {
@@ -98,8 +98,7 @@ fn dropping_caught_drops_error_and_releases_the_slot() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
     {
-        let result =
-            slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
+        let result = slot.try_call(|out| Err::<(), _>(out.fail(DropCounter(Arc::clone(&drops)))));
         assert!(result.is_err());
         let Some(caught) = result.err() else {
             return;
@@ -109,15 +108,14 @@ fn dropping_caught_drops_error_and_releases_the_slot() {
     }
 
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(matches!(slot.call(|_| OResult::success(41)), Ok(41)));
+    assert!(matches!(slot.call(|_| Ok(41)), Ok(41)));
 }
 
 #[test]
 fn taking_caught_transfers_error_ownership() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
-    let result =
-        slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
+    let result = slot.try_call(|out| Err::<(), _>(out.fail(DropCounter(Arc::clone(&drops)))));
     assert!(result.is_err());
     let Some(caught) = result.err() else {
         return;
@@ -133,8 +131,7 @@ fn taking_caught_transfers_error_ownership() {
 fn dropping_slot_cleans_error_when_caught_was_forgotten() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
-    let result =
-        slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
+    let result = slot.try_call(|out| Err::<(), _>(out.fail(DropCounter(Arc::clone(&drops)))));
     assert!(result.is_err());
     let Some(caught) = result.err() else {
         return;
@@ -150,8 +147,7 @@ fn dropping_slot_cleans_error_when_caught_was_forgotten() {
 fn a_new_call_clears_an_error_from_a_forgotten_caught_value() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut slot = ErrSlot::<DropCounter>::new();
-    let result =
-        slot.try_call(|out| OResult::<()>::failed(out.fail(DropCounter(Arc::clone(&drops)))));
+    let result = slot.try_call(|out| Err::<(), _>(out.fail(DropCounter(Arc::clone(&drops)))));
     assert!(result.is_err());
     let Some(caught) = result.err() else {
         return;
@@ -159,7 +155,7 @@ fn a_new_call_clears_an_error_from_a_forgotten_caught_value() {
 
     forget(caught);
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert!(matches!(slot.call(|_| OResult::success(99)), Ok(99)));
+    assert!(matches!(slot.call(|_| Ok(99)), Ok(99)));
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -176,7 +172,7 @@ fn panic_after_fail_drops_error_and_releases_the_slot() {
 
     assert!(result.is_err());
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(matches!(slot.call(|_| OResult::success(51)), Ok(51)));
+    assert!(matches!(slot.call(|_| Ok(51)), Ok(51)));
 }
 
 #[test]
@@ -187,7 +183,7 @@ fn panic_before_fail_leaves_slot_usable() {
     }));
 
     assert!(result.is_err());
-    assert_eq!(slot.call(|_| OResult::success(61)), Ok(61));
+    assert_eq!(slot.call(|_| Ok(61)), Ok(61));
 }
 
 #[test]
@@ -224,12 +220,12 @@ fn successful_return_drops_an_unreported_error() {
     let mut slot = ErrSlot::<DropCounter>::new();
     let result = slot.call(|out| {
         let _failure = out.fail(DropCounter(Arc::clone(&drops)));
-        OResult::success(71)
+        Ok(71)
     });
 
     assert!(matches!(result, Ok(71)));
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(matches!(slot.call(|_| OResult::success(72)), Ok(72)));
+    assert!(matches!(slot.call(|_| Ok(72)), Ok(72)));
 }
 
 #[test]
@@ -238,12 +234,12 @@ fn success_after_a_write_cleans_the_slot_without_panicking() {
     let mut slot = ErrSlot::<DropCounter>::new();
     let result = slot.call(|out| {
         let _failure = out.fail(DropCounter(Arc::clone(&drops)));
-        OResult::success(71)
+        Ok(71)
     });
 
     assert!(matches!(result, Ok(71)));
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(matches!(slot.call(|_| OResult::success(72)), Ok(72)));
+    assert!(matches!(slot.call(|_| Ok(72)), Ok(72)));
 }
 
 #[test]
@@ -253,14 +249,14 @@ fn repeated_writes_replace_and_drop_the_previous_error() {
     let result = slot.call(|mut out| {
         let _first = out.reborrow().fail(DropCounter(Arc::clone(&drops)));
         let second = out.fail(DropCounter(Arc::clone(&drops)));
-        OResult::<()>::failed(second)
+        Err::<(), _>(second)
     });
 
     assert!(result.is_err());
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     drop(result);
     assert_eq!(drops.load(Ordering::SeqCst), 2);
-    assert!(matches!(slot.call(|_| OResult::success(81)), Ok(81)));
+    assert!(matches!(slot.call(|_| Ok(81)), Ok(81)));
 }
 
 struct DropCounter(Arc<AtomicUsize>);

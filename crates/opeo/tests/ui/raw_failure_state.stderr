@@ -1,9 +1,12 @@
-error[E0451]: fields `value` and `slot` of struct `OResult` are private
- --> tests/ui/raw_failure_state.rs:6:9
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/raw_failure_state.rs:5:9
   |
-5 |     OResult {
-  |     ------- in this type
-6 |         value: Err(()),
-  |         ^^^^^ private field
-7 |         slot: PhantomData,
-  |         ^^^^ private field
+5 |     Err(Failed(PhantomData))
+  |         ^^^^^^
+  |
+  = note: a struct named `Failed` exists in another namespace
+note: constructor is not visible here due to private fields
+ --> src/lib.rs
+  |
+  | pub struct Failed<'slot>(PhantomData<fn(&'slot ()) -> &'slot ()>);
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field

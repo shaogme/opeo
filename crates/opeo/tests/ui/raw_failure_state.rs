@@ -1,11 +1,8 @@
 use core::marker::PhantomData;
-use opeo::OResult;
+use opeo::{Failed, OResult};
 
 fn fabricate<'slot>() -> OResult<'slot, u8> {
-    OResult {
-        value: Err(()),
-        slot: PhantomData,
-    }
+    Err(Failed(PhantomData))
 }
 
 fn main() {}

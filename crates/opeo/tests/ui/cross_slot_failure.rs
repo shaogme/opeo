@@ -1,11 +1,8 @@
-use opeo::{OResult, Out, opeo_try};
+use opeo::OResult;
 
-fn propagate<'slot, 'borrow>(
-    result: OResult<'static, u8>,
-    mut out: Out<'slot, 'borrow, ()>,
-) -> OResult<'slot, u8> {
-    let value = opeo_try!(out, result);
-    OResult::success(value)
+fn propagate<'slot>(result: OResult<'static, u8>) -> OResult<'slot, u8> {
+    let value = result?;
+    Ok(value)
 }
 
 fn main() {}

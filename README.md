@@ -1,50 +1,44 @@
 # opeo
 
-`opeo` is a Rust error-handling library that keeps an error value in caller-owned storage while a function returns its success value separately. A typed failure proof connects the returned state to the error slot, so a failure cannot be propagated from a different call's slot.
+`opeo` is a Rust error-handling library that stores errors in caller-owned storage while returning success values directly. A lifetime-branded failure proof ties each failed result to the slot that received its error.
 
-The runtime crate is `no_std`. The companion `opeo-macros` crate provides `#[opeo]`, which turns a conventional `Result` function into an OPEO function and generates a standard `Result` wrapper by default for callers that prefer the usual interface.
+The runtime is `no_std` and has no heap allocation for the error slot. `OResult<'slot, T>` is an alias for `Result<T, Failed<'slot>>`. The `Failed` constructor is private: safe code obtains a failure proof through `Out::fail` or `OutEdit::commit`.
 
 [简体中文 README](README_CN.md)
 
 ## How it works
 
-An OPEO function receives an `Out` handle and returns `OResult`:
+An OPEO function receives an `Out` handle and returns a standard `Result` whose error is branded for that slot:
 
 ```text
 caller owns ErrSlot<E>
        │ lends Out<'slot, E>
        ▼
-OPEO function returns OResult<'slot, T>
-       │ on failure, E is in the slot and Failed<'slot> proves it
+OPEO function returns Result<T, Failed<'slot>>
+       │ on failure, E is stored in the slot and Failed<'slot> proves it
        ▼
-caller receives success T or handles the error in the slot
+caller receives T or handles the stored error
 ```
 
-`OResult` stores either a success value or a zero-sized failure marker; the error itself is written into the `ErrSlot<E>`. Its lifetime brand ties the failure marker to the slot that received the error. `ErrSlot::call` bridges this interface back to `Result<T, E>`, while `ErrSlot::try_call` returns a `Caught` borrow so the caller can inspect or take the stored error.
+`ErrSlot::call` bridges an OPEO function back to `Result<T, E>`. `ErrSlot::try_call` instead returns a `Caught` borrow so the caller can inspect or take the error. Async functions can be bridged with `call_async` or inspected with `try_call_async`.
 
-`OResult` provides `is_ok`, `is_err`, `map`, and `and_then` for inspecting the state and composing success paths. The closure passed to `and_then` must return an `OResult` branded for the same slot. Asynchronous calls can use `ErrSlot::try_call_async` to inspect a borrowed error as well.
-
-`Out::edit` writes an error into the slot and returns an `OutEdit`. The editor can borrow or modify the error; only `commit` produces a `Failed` proof. Dropping the editor before commit restores the slot's previous value.
-
-The implementation uses no heap allocation for the slot and keeps the runtime independent of `std`. The error type `E` controls its own storage and may, of course, allocate. `OResult<T>` has the same layout as `Result<T, ()>` in the tested configurations; callers should rely on the public API rather than private representation details.
+Use `Ok(value)` for success and `Err(out.fail(error))` for failure. A nested OPEO function using the same slot can be propagated with native `?`. A regular `Result<T, E>` must first be converted explicitly with `ResultOutExt` or `opeo_try!`.
 
 ## Install
 
-Add the runtime crate to your package. The procedural macro is re-exported by `opeo`, so a direct dependency on `opeo-macros` is not needed:
+Add the runtime crate to your package:
 
 ```toml
 [dependencies]
-opeo = "0.1"
+opeo = "0.2"
 ```
 
 The workspace uses Rust 2024 and declares Rust 1.85 as its minimum version.
 
-## Quick start with `#[opeo]`
-
-Write a normal function returning `Result<T, E>` and mark it with `#[opeo]`. The macro keeps the function as the OPEO entry point, rewrites fallible operations, and adds a standard wrapper named `<function>_std` by default. Set `wrapper = false` to omit the wrapper when you only need the OPEO entry point.
+## Write an OPEO function
 
 ```rust
-use opeo::{opeo, ErrSlot};
+use opeo::{bail, ensure, ErrSlot, OResult, Out, ResultOutExt};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ParseError {
@@ -53,460 +47,142 @@ enum ParseError {
     Zero,
 }
 
-#[opeo]
-fn parse_positive(input: &str) -> Result<u32, ParseError> {
+fn parse_positive<'slot, 'borrow>(
+    input: &str,
+    mut out: Out<'slot, 'borrow, ParseError>,
+) -> OResult<'slot, u32> {
     if input.is_empty() {
-        return Err(ParseError::Empty);
+        bail!(out, ParseError::Empty);
     }
 
     let value = input
         .parse::<u32>()
-        .map_err(|_| ParseError::InvalidNumber)?;
-    if value == 0 {
-        return Err(ParseError::Zero);
-    }
-
+        .map_err(|_| ParseError::InvalidNumber)
+        .or_out_into(out.reborrow())?;
+    ensure!(out, value > 0, ParseError::Zero);
     Ok(value)
 }
 
 let mut errors = ErrSlot::<ParseError>::new();
 assert_eq!(errors.call(|out| parse_positive("42", out)), Ok(42));
-assert_eq!(parse_positive_std("0"), Err(ParseError::Zero));
+assert_eq!(errors.call(|out| parse_positive("0", out)), Err(ParseError::Zero));
 ```
 
-The generated `parse_positive_std` has the original `Result<u32, ParseError>` interface. Call `parse_positive` directly when the caller already owns an `ErrSlot` and wants the OPEO path.
+`ResultOutExt::or_out` stores an error of the same type, `or_out_with` applies a conversion closure, and `or_out_into` uses `From<E>`. Each method returns `OResult`, so `?` then propagates the branded failure.
 
-## Inspect or take an error
+For an `Option<T>`, supply the error explicitly with `opeo_try!(out, option, error)`. The two-argument `opeo_try!(out, result)` form bridges a standard `Result`; same-slot OPEO results should use native `?`.
 
-`try_call` gives access to a `Caught` value on failure. `get` borrows the error, `get_mut` mutably borrows it, and `take` moves it out of the slot. If a `Caught` value is dropped without taking the error, the stored error is dropped too. Use `try_call_async` for the same inspection behavior with an asynchronous OPEO call.
+## Propagate a same-slot result
+
+The alias behaves as a normal `Result`, while `Failed<'slot>` keeps the slot brand in the error type:
 
 ```rust
-use opeo::{opeo, ErrSlot};
+use opeo::{OResult, Out};
 
-#[derive(Debug, PartialEq, Eq)]
-enum ParseError {
-    InvalidNumber,
+struct ParseError;
+
+fn parse_leaf<'slot, 'borrow>(out: Out<'slot, 'borrow, ParseError>) -> OResult<'slot, u32> {
+    Err(out.fail(ParseError))
 }
 
-#[opeo]
-fn parse_number(input: &str) -> Result<u32, ParseError> {
-    input
-        .parse::<u32>()
-        .map_err(|_| ParseError::InvalidNumber)
+fn parse_nested<'slot, 'borrow>(mut out: Out<'slot, 'borrow, ParseError>) -> OResult<'slot, u32> {
+    let value = parse_leaf(out.reborrow())?;
+    Ok(value)
 }
-
-let mut errors = ErrSlot::<ParseError>::new();
-let caught = errors
-    .try_call(|out| parse_number("not a number", out))
-    .unwrap_err();
-assert_eq!(caught.get(), &ParseError::InvalidNumber);
-assert_eq!(caught.take(), ParseError::InvalidNumber);
 ```
 
-## Write OPEO functions directly
+A failure from a different slot cannot be propagated because its `Failed` lifetime does not match the return type.
 
-Use `Out`, `OResult`, and `opeo_try!` when you want to define the OPEO form without the attribute macro. The `?`-style macro accepts a `Result`; its source error must convert into the slot's error type, or you can convert it with `map_err` first.
+## Write a standard `Result` wrapper
+
+Use `ErrSlot::call` wherever a standard `Result` interface is useful:
 
 ```rust
-use opeo::{ErrSlot, OResult, Out, opeo_try};
+use opeo::{ErrSlot, OResult, Out, ResultOutExt};
 
 #[derive(Debug, PartialEq, Eq)]
-enum ParseError {
-    InvalidNumber,
-}
+struct ParseError;
 
-fn parse_number<'slot, 'borrow>(
+fn parse_positive<'slot, 'borrow>(
     input: &str,
     mut out: Out<'slot, 'borrow, ParseError>,
 ) -> OResult<'slot, u32> {
-    let value = opeo_try!(
-        out,
-        input
-            .parse::<u32>()
-            .map_err(|_| ParseError::InvalidNumber)
-    );
-    OResult::success(value)
+    let value = input
+        .parse::<u32>()
+        .map_err(|_| ParseError)
+        .or_out(out.reborrow())?;
+    Ok(value)
 }
 
-let mut errors = ErrSlot::<ParseError>::new();
-assert_eq!(errors.call(|out| parse_number("17", out)), Ok(17));
+fn parse_positive_std(input: &str) -> Result<u32, ParseError> {
+    let mut errors = ErrSlot::<ParseError>::new();
+    errors.call(|out| parse_positive(input, out))
+}
+
+assert_eq!(parse_positive_std("17"), Ok(17));
 ```
 
-`Out::reborrow` creates a shorter mutable borrow for nested OPEO calls. This lets a caller propagate an `OResult` from the same slot while the borrow checker prevents mixing failure states from unrelated slots.
+## Methods, traits, and async functions
 
-Use `Out::edit` to enrich an error in place before committing it:
+OPEO functions are ordinary Rust functions, methods, and trait methods. They use the same `Out` and `OResult` signature and standard `Result` operations:
+
+```rust
+use opeo::{OResult, Out};
+
+struct Meter(u32);
+struct ParseError;
+
+impl Meter {
+    fn add<'slot, 'borrow>(
+        &self,
+        amount: u32,
+        _out: Out<'slot, 'borrow, ParseError>,
+    ) -> OResult<'slot, u32> {
+        Ok(self.0 + amount)
+    }
+}
+```
+
+An `async fn` can use `.await` and return `OResult` as usual. Call it with `ErrSlot::call_async` or `try_call_async`.
+
+## Runtime API
+
+| Item | Purpose |
+| --- | --- |
+| `ErrSlot<E>` | Owns error storage. Use `call`/`call_async` for a standard `Result`, or `try_call`/`try_call_async` for a borrowed `Caught` error. |
+| `Out<'slot, 'borrow, E>` | Writes errors with `fail`, edits a pending error with `edit`, and lends nested handles with `reborrow`. |
+| `OutEdit<'slot, 'borrow, E>` | Borrows or modifies the stored error; `commit` produces its failure proof. Dropping it uncommitted restores the previous error. |
+| `OResult<'slot, T>` | Alias for `Result<T, Failed<'slot>>`. |
+| `Failed<'slot>` | Private-construction proof returned by `Out::fail` or `OutEdit::commit`. |
+| `Caught<'slot, E>` | Borrows the stored error; `get`/`get_mut` inspect it and `take` moves it out. |
+| `ResultOutExt` | Converts a standard `Result` with `or_out`, `or_out_with`, or `or_out_into`. |
+| `bail!` | Writes an error and returns early from an OPEO function. |
+| `ensure!` | Returns early with an error when a condition is false. |
+| `opeo_try!` | Bridges a standard `Result`, or an `Option` with an explicit error. |
+
+`Out::edit` can add context before committing the stored error:
 
 ```rust
 use opeo::{ErrSlot, OResult};
 
 #[derive(Debug, PartialEq, Eq)]
-struct ParseError {
-    context: Option<&'static str>,
-}
+struct ContextError(Option<&'static str>);
 
-let mut errors = ErrSlot::<ParseError>::new();
+let mut errors = ErrSlot::<ContextError>::new();
 let result = errors.call(|out| {
-    let mut edit = out.edit(ParseError { context: None });
-    edit.get_mut().context = Some("header");
-    OResult::<()>::failed(edit.commit())
+    let mut edit = out.edit(ContextError(None));
+    edit.get_mut().0 = Some("header");
+    Err::<(), _>(edit.commit())
 });
-
-assert_eq!(result, Err(ParseError { context: Some("header") }));
+assert_eq!(result, Err(ContextError(Some("header"))));
 ```
 
-## Public API
+## Changes in 0.2
 
-| Item | Purpose |
-| --- | --- |
-| `ErrSlot<E>` | Owns the error storage. Use `call`/`call_async` for a standard `Result`, or `try_call`/`try_call_async` for a borrowed `Caught` error. |
-| `Out<'slot, 'borrow, E>` | Writes and commits an error with `fail`, edits a pending error in place with `edit`, and creates nested handles with `reborrow`. |
-| `OutEdit<'slot, 'borrow, E>` | Borrows or modifies the error in the slot; `commit` produces a failure proof, while dropping it uncommitted restores the previous value. |
-| `OResult<'slot, T>` | Returns a success value or a failure branded for one slot; supports state checks and success value composition. |
-| `Failed<'slot>` | Proof produced by `Out::fail` or `OutEdit::commit` and used to construct a failure result. |
-| `Caught<'slot, E>` | Borrows the stored error; use `get`/`get_mut` to inspect or modify it and `take` to own it. |
-| `ResultOutExt` | Converts a standard `Result` to `OResult` with `or_out`, `or_out_with`, or `or_out_into`. |
-| `bail!` | Writes an error and returns early from an OPEO function. |
-| `ensure!` | Returns early with an error when a condition is false. |
-| `opeo_try!` | Propagates a `Result`, an `OResult` from the same slot, or an `Option` with an explicit error value. |
+`OResult<'slot, T>` is now a type alias for `Result<T, Failed<'slot>>`; `OResult::success`, `OResult::failed`, and `into_result()` were removed. Return `Ok(value)` or `Err(out.fail(error))` instead.
 
-For example, `ResultOutExt` can bridge a standard result in a manually written OPEO function:
+The `#[opeo]` attribute macro and hidden `__OpeoTry` bridge were removed. Convert standard `Result` errors explicitly with `ResultOutExt` or `opeo_try!`, and use native `?` for a same-slot OPEO result. The `opeo-macros` crate is no longer part of the workspace.
 
-```rust
-use opeo::{ErrSlot, ResultOutExt};
-
-let mut errors = ErrSlot::<&str>::new();
-let result = errors.call(|out| Err::<u32, _>("invalid input").or_out(out));
-assert_eq!(result, Err("invalid input"));
-```
-
-The `bail!` macro is also available under the alias `abort!` when renamed at import. `opeo_try!` may similarly be imported under another name.
-
-## Attribute options and `Result` aliases
-
-The wrapper name can be set explicitly:
-
-```rust
-use opeo::{opeo, ErrSlot};
-
-#[derive(Debug, PartialEq, Eq)]
-enum ParseError {
-    InvalidNumber,
-}
-
-#[opeo(wrapper = parse_standard)]
-fn parse(input: &str) -> Result<u32, ParseError> {
-    input
-        .parse::<u32>()
-        .map_err(|_| ParseError::InvalidNumber)
-}
-
-let mut errors = ErrSlot::<ParseError>::new();
-assert_eq!(errors.call(|out| parse("8", out)), Ok(8));
-assert_eq!(parse_standard("9"), Ok(9));
-```
-
-To generate only the OPEO entry point, disable the wrapper explicitly:
-
-```rust
-use opeo::{opeo, ErrSlot};
-
-#[derive(Debug, PartialEq, Eq)]
-enum ParseError {
-    InvalidNumber,
-}
-
-#[opeo(wrapper = false)]
-fn parse(input: &str) -> Result<u32, ParseError> {
-    input
-        .parse::<u32>()
-        .map_err(|_| ParseError::InvalidNumber)
-}
-
-let mut errors = ErrSlot::<ParseError>::new();
-assert_eq!(errors.call(|out| parse("12", out)), Ok(12));
-```
-
-The macro keeps `parse` as the OPEO entry point and does not generate `parse_std`. Call it through `ErrSlot::call` when you need a standard `Result` at the call site.
-
-When a function body ends in a `loop` with no `break` that exits that loop, the macro preserves its diverging control flow. A `?` inside the loop still writes failures to the error slot and returns early.
-
-If the return type is a type alias whose final path segment is not named `Result`, provide both success and error types so the macro can determine the OPEO signature:
-
-```rust
-use opeo::{opeo, ErrSlot};
-
-#[derive(Debug, PartialEq, Eq)]
-enum ParseError {
-    InvalidNumber,
-}
-
-type ParseResult = Result<u32, ParseError>;
-
-#[opeo(ok = u32, error = ParseError)]
-fn parse(input: &str) -> ParseResult {
-    input
-        .parse::<u32>()
-        .map_err(|_| ParseError::InvalidNumber)
-}
-
-let mut errors = ErrSlot::<ParseError>::new();
-assert_eq!(errors.call(|out| parse("8", out)), Ok(8));
-```
-
-`wrapper_attrs(path, ...)` selects custom function attributes to copy to the generated wrapper. Standard attributes such as `cfg`, `doc`, `deprecated`, `inline`, `cold`, `must_use`, and `track_caller` are copied automatically. Symbol-changing attributes are not copied to the wrapper, so the original function keeps its symbol attributes without creating a duplicate symbol.
-
-## Struct methods
-
-Apply `#[opeo]` to an instance method in an inherent `impl` block. The macro keeps the method as the OPEO entry point and generates a standard wrapper method with the same receiver by default. The wrapper name defaults to `<method>_std`, can be set with `wrapper = ...`, or can be disabled with `wrapper = false`. Async methods produce an async OPEO method and, when enabled, an async standard wrapper. Generated wrappers for const methods keep `const`; the OPEO entry is runtime-only because it writes to an error slot.
-
-```rust
-use core::convert::Infallible;
-use opeo::{opeo, ErrSlot};
-
-struct Counter {
-    value: u32,
-}
-
-impl Counter {
-    #[opeo]
-    fn add(&self, amount: u32) -> Result<u32, Infallible> {
-        Ok(self.value + amount)
-    }
-}
-
-let counter = Counter { value: 5 };
-assert_eq!(counter.add_std(3), Ok(8));
-
-let mut errors = ErrSlot::<Infallible>::new();
-assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
-```
-
-## Trait methods
-
-Apply `#[opeo]` to a required or default method in a trait to add the OPEO signature and a default standard wrapper to the trait. Applying the attribute to the implementation transforms its body and generates the standard wrapper implementation as well.
-
-```rust
-use core::convert::Infallible;
-use opeo::{opeo, ErrSlot};
-
-trait Counter {
-    #[opeo]
-    fn add(&self, amount: u32) -> Result<u32, Infallible>;
-}
-
-struct SimpleCounter(u32);
-
-impl Counter for SimpleCounter {
-    #[opeo]
-    fn add(&self, amount: u32) -> Result<u32, Infallible> {
-        Ok(self.0 + amount)
-    }
-}
-
-let counter = SimpleCounter(5);
-assert_eq!(counter.add_std(3), Ok(8));
-
-let mut errors = ErrSlot::<Infallible>::new();
-assert_eq!(errors.call(|out| counter.add(4, out)), Ok(9));
-```
-
-### Generic methods with different slot error types
-
-When an operation inside a method returns a fixed `SourceError`, make the method's error type a generic `E` and require `E: From<SourceError>`. With `#[opeo]`, the `E` in the return type also becomes the generated `Out` error type, so the same method can accept an `Out` borrowed from different `ErrSlot<E>` values.
-
-```rust
-use opeo::{opeo, ErrSlot};
-
-#[derive(Debug, PartialEq, Eq)]
-struct SourceError;
-
-fn inner_operation(value: u32) -> Result<u32, SourceError> {
-    if value == 0 {
-        Err(SourceError)
-    } else {
-        Ok(value)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ApiError(SourceError);
-
-impl From<SourceError> for ApiError {
-    fn from(error: SourceError) -> Self {
-        Self(error)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct StorageError(SourceError);
-
-impl From<SourceError> for StorageError {
-    fn from(error: SourceError) -> Self {
-        Self(error)
-    }
-}
-
-struct Service;
-
-impl Service {
-    #[opeo]
-    fn process<E>(&self, value: u32) -> Result<u32, E>
-    where
-        E: From<SourceError>,
-    {
-        let value = inner_operation(value)?;
-        Ok(value + 1)
-    }
-}
-
-let service = Service;
-let mut api_errors = ErrSlot::<ApiError>::new();
-assert_eq!(api_errors.call(|out| service.process(7, out)), Ok(8));
-assert_eq!(
-    api_errors.call(|out| service.process(0, out)),
-    Err(ApiError(SourceError))
-);
-
-let mut storage_errors = ErrSlot::<StorageError>::new();
-assert_eq!(
-    storage_errors.call(|out| service.process(0, out)),
-    Err(StorageError(SourceError))
-);
-```
-
-Without `#[opeo]`, declare the error type of `Out` as a generic `E` in the method signature and convert the inner error with `From` in the failure branch:
-
-```rust
-use opeo::{ErrSlot, OResult, Out};
-
-#[derive(Debug, PartialEq, Eq)]
-struct SourceError;
-
-fn inner_operation(value: u32) -> Result<u32, SourceError> {
-    if value == 0 {
-        Err(SourceError)
-    } else {
-        Ok(value)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ApiError(SourceError);
-
-impl From<SourceError> for ApiError {
-    fn from(error: SourceError) -> Self {
-        Self(error)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct StorageError(SourceError);
-
-impl From<SourceError> for StorageError {
-    fn from(error: SourceError) -> Self {
-        Self(error)
-    }
-}
-
-struct Service;
-
-impl Service {
-    fn process<'slot, 'borrow, E>(
-        &self,
-        value: u32,
-        out: Out<'slot, 'borrow, E>,
-    ) -> OResult<'slot, u32>
-    where
-        E: From<SourceError>,
-    {
-        match inner_operation(value) {
-            Ok(value) => OResult::success(value + 1),
-            Err(error) => OResult::failed(out.fail(error.into())),
-        }
-    }
-}
-
-let service = Service;
-let mut api_errors = ErrSlot::<ApiError>::new();
-assert_eq!(api_errors.call(|out| service.process(7, out)), Ok(8));
-assert_eq!(
-    api_errors.call(|out| service.process(0, out)),
-    Err(ApiError(SourceError))
-);
-
-let mut storage_errors = ErrSlot::<StorageError>::new();
-assert_eq!(
-    storage_errors.call(|out| service.process(0, out)),
-    Err(StorageError(SourceError))
-);
-```
-
-### Calling another `#[opeo]` method from a transformed method
-
-An `#[opeo]` method name refers to its OPEO entry point, so another transformed method cannot call it as `self.child(...)?`: the entry point takes an additional `Out` argument and returns `OResult`. There are two current options: call the generated standard wrapper, or explicitly pass a shorter borrow of the same error slot. If the child method uses `wrapper = false`, only the same-slot form is available.
-
-```rust
-use opeo::{opeo, opeo_try, ErrSlot};
-
-#[derive(Debug, PartialEq, Eq)]
-enum AddError {
-    Zero,
-}
-
-struct Counter {
-    value: u32,
-}
-
-impl Counter {
-    #[opeo]
-    fn add(&self, amount: u32) -> Result<u32, AddError> {
-        if amount == 0 {
-            return Err(AddError::Zero);
-        }
-        Ok(self.value + amount)
-    }
-
-    #[opeo]
-    fn add_then_increment_via_wrapper(&self, amount: u32) -> Result<u32, AddError> {
-        let value = self.add_std(amount)?;
-        Ok(value + 1)
-    }
-
-    #[opeo]
-    fn add_then_increment_in_same_slot(&self, amount: u32) -> Result<u32, AddError> {
-        let value = opeo_try!(out, self.add(amount, out.reborrow()));
-        Ok(value + 1)
-    }
-}
-
-let counter = Counter { value: 5 };
-assert_eq!(counter.add_then_increment_via_wrapper_std(3), Ok(9));
-assert_eq!(counter.add_then_increment_via_wrapper_std(0), Err(AddError::Zero));
-
-let mut errors = ErrSlot::<AddError>::new();
-assert_eq!(
-    errors.call(|out| counter.add_then_increment_in_same_slot(3, out)),
-    Ok(9)
-);
-assert_eq!(
-    errors.call(|out| counter.add_then_increment_in_same_slot(0, out)),
-    Err(AddError::Zero)
-);
-```
-
-`self.add_std(...) ?` first bridges through the child method's own error slot and then propagates the `Result` into the current method's slot. It also supports different error types when `From` provides the conversion. The same-slot form avoids that `Result` bridge, but both methods must use the same error type, and the call must explicitly use `opeo_try!` and `out.reborrow()`.
-
-## Supported functions and error conversion
-
-`#[opeo]` supports free functions and instance methods in inherent `impl` blocks, including async and const functions and methods. The return type must be a path that resolves to `Result<T, E>` or use explicit `ok` and `error` types. Generated async wrappers return a future, and `ErrSlot::call_async` bridges async OPEO calls back to `Result<T, E>`. Generated wrappers for const functions and methods remain const; the OPEO entry is not const because it writes to runtime error storage. A function or method may have up to six explicit input parameters; the macro adds the `Out` parameter to the OPEO form. `extern` and variadic functions are rejected.
-
-Question-mark propagation in the function body stores the source error in the slot. For a `Result<T, SourceError>`, the slot error type must implement `From<SourceError>`; use `map_err` when a custom conversion is needed. Nested closures keep their own normal `?` behavior. For `Option<T>`, use `opeo_try!(out, option, error_value)` to provide the error explicitly.
-
-The macro reserves the identifier `out` in the transformed function body and generated parameter list. Give ordinary inputs and local bindings different names.
-
-## Crates and license
-
-- [`opeo`](https://crates.io/crates/opeo) contains the `no_std` runtime, public types, and exported macros.
-- [`opeo-macros`](https://crates.io/crates/opeo-macros) contains the procedural macro implementation and is re-exported by `opeo`.
+## License
 
 This project is dual-licensed under MIT or Apache-2.0.
