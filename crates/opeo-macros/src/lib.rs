@@ -266,7 +266,16 @@ fn expand_opeo_with_path(
         function.sig.constness = None;
     }
     function.sig.output = parse_quote!(-> #runtime_path::OResult<#slot_lifetime, #ok_type>);
-    let mut visitor = RewriteTry::new(runtime_path.clone());
+    let source_result_type = match &original_output {
+        ReturnType::Type(_, output_type) => output_type.as_ref().clone(),
+        ReturnType::Default => {
+            return Err(Error::new_spanned(
+                &original_output,
+                "#[opeo] requires a Result<T, E> return type",
+            ));
+        }
+    };
+    let mut visitor = RewriteTry::new(runtime_path.clone(), source_result_type);
     visitor.visit_function_body(&mut function.block);
     function
         .block
@@ -626,6 +635,7 @@ impl VisitMut for LifetimeCollector {
 
 struct RewriteTry {
     runtime_path: Path,
+    source_result_type: Type,
     rewrite_question_marks: bool,
 }
 
@@ -665,9 +675,10 @@ impl VisitMut for RewriteTry {
 }
 
 impl RewriteTry {
-    fn new(runtime_path: Path) -> Self {
+    fn new(runtime_path: Path, source_result_type: Type) -> Self {
         Self {
             runtime_path,
+            source_result_type,
             rewrite_question_marks: true,
         }
     }
@@ -744,11 +755,15 @@ impl RewriteTry {
 
     fn rewrite_result_expression(&self, expression: &mut Expr) {
         let runtime_path = &self.runtime_path;
+        let source_result_type = &self.source_result_type;
         let result = expression.clone();
-        *expression = parse_quote!(#runtime_path::__OpeoTry::__opeo_try(
-            #result,
-            out.reborrow(),
-        ));
+        *expression = parse_quote!({
+            let __opeo_result: #source_result_type = #result;
+            #runtime_path::__OpeoTry::__opeo_try(
+                __opeo_result,
+                out.reborrow(),
+            )
+        });
     }
 
     fn rewrite_result_call(&mut self, expression: &mut Expr) {
@@ -1046,7 +1061,8 @@ mod tests {
 
     #[test]
     fn tail_rewriting_recurses_through_parentheses_and_leaves_diverging_macros_alone() {
-        let mut rewrite = RewriteTry::new(parse_quote!(::opeo));
+        let mut rewrite =
+            RewriteTry::new(parse_quote!(::opeo), parse_quote!(Result<u32, ParseError>));
         let mut parenthesized_tail: Expr = parse_quote!((Ok(7)));
         rewrite.rewrite_result_tail(&mut parenthesized_tail);
         let rewritten = quote!(#parenthesized_tail).to_string();

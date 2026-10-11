@@ -78,7 +78,6 @@ impl<'slot, T> OResult<'slot, T> {
 
     /// Creates a failure result from a real failure proof.
     /// 根据真实失败凭证创建失败结果。
-    #[doc(hidden)]
     pub const fn failed(_failure: Failed<'slot>) -> Self {
         Self {
             value: Err(()),
@@ -88,8 +87,7 @@ impl<'slot, T> OResult<'slot, T> {
 
     /// Exposes the branded state to generated propagation code.
     /// 暴露品牌化的内部状态供生成代码传播。
-    #[doc(hidden)]
-    pub fn __into_result(self) -> Result<T, Failed<'slot>> {
+    pub fn into_result(self) -> Result<T, Failed<'slot>> {
         match self.value {
             Ok(value) => Ok(value),
             Err(()) => Err(Failed(PhantomData)),
@@ -250,7 +248,7 @@ impl<E> ErrSlot<E> {
         let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
         let result = f(out);
 
-        match result.__into_result() {
+        match result.into_result() {
             Ok(value) => {
                 guard.drop_error();
                 guard.disarm();
@@ -281,7 +279,7 @@ impl<E> ErrSlot<E> {
         let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
         let result = f(out).await;
 
-        match result.__into_result() {
+        match result.into_result() {
             Ok(value) => {
                 guard.drop_error();
                 guard.disarm();
@@ -324,7 +322,7 @@ impl<E> ErrSlot<E> {
         let out = Out(NonNull::from(guard.state_mut()), PhantomData, PhantomData);
         let result = f(out).await;
 
-        match result.__into_result() {
+        match result.into_result() {
             Ok(value) => {
                 guard.drop_error();
                 guard.disarm();
@@ -555,7 +553,7 @@ macro_rules! ensure {
 #[macro_export]
 macro_rules! __opeo_try_value {
     ($out:expr, $result:expr $(,)?) => {
-        match $crate::OResult::__into_result($crate::__OpeoTry::__opeo_try(
+        match $crate::OResult::into_result($crate::__OpeoTry::__opeo_try(
             ($result),
             ($out).reborrow(),
         )) {

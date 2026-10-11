@@ -257,9 +257,9 @@ fn parse_alias(input: Option<u32>) -> Result<u32, ParseError> {
 #[opeo(wrapper = parse_typed_ok_std, ok = u32, error = ParseError)]
 fn parse_typed_ok(valid: bool) -> ParseResult<u32, ParseError> {
     if valid {
-        return Ok::<u32, ParseError>(7);
+        return Ok(7);
     }
-    Ok::<u32, ParseError>(9)
+    Ok(9)
 }
 
 #[opeo(wrapper = parse_optional_result_std, ok = Option<u32>, error = ParseError)]
@@ -346,7 +346,7 @@ fn parse_unsafe_tail(value: *const u32) -> Result<u32, ParseError> {
 fn loop_with_break(stop: bool) -> Result<u32, ParseError> {
     loop {
         if stop {
-            break Ok::<u32, ParseError>(17);
+            break Ok(17);
         }
     }
 }
@@ -355,7 +355,7 @@ fn loop_with_break(stop: bool) -> Result<u32, ParseError> {
 fn loop_with_macro_break(stop: bool) -> Result<u32, ParseError> {
     loop {
         if stop {
-            break_loop_with_result!(Ok::<u32, ParseError>(18));
+            break_loop_with_result!(Ok(18));
         }
     }
 }
